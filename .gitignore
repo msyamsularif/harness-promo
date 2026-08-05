@@ -1,0 +1,8 @@
+.env
+.dart_tool/
+.packages
+build/
+*.log
+harness_promo
+bot_listener
+.bot_offset

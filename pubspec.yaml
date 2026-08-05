@@ -1,0 +1,27 @@
+name: harness
+description: >
+  A weekly promo scraper & summarizer for Indonesian F&B (Makanan, Minuman,
+  Jajanan) and Lifestyle deals. Uses SerpApi as a Genkit tool so Gemini can
+  search and reason agentically, deduplicates across sources, filters out
+  unreachable source links, adds a social media "buzz" signal, and sends
+  the result to Telegram. Designed to run as a lightweight AOT binary on a
+  low-resource device (e.g. an Armbian-based STB with 2GB RAM).
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+
+dependencies:
+  genkit: any
+  genkit_google_genai: any
+  genkit_openai: 0.3.7
+  http: ^1.2.0
+  dotenv: ^4.2.0
+  intl: ^0.19.0
+  schemantic: any
+
+dev_dependencies:
+  lints: ^4.0.0
+  build_runner: ^2.4.0
+  schemantic_builder: any
