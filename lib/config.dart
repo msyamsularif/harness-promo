@@ -6,6 +6,7 @@ import 'package:dotenv/dotenv.dart';
 /// development) or from OS environment variables (for cron/service runs).
 class Config {
   final String geminiApiKey;
+  final String? groqApiKey;
   final String serpapiKey;
   final String telegramBotToken;
   final String telegramChatId;
@@ -26,6 +27,7 @@ class Config {
 
   Config._({
     required this.geminiApiKey,
+    required this.groqApiKey,
     required this.serpapiKey,
     required this.telegramBotToken,
     required this.telegramChatId,
@@ -65,6 +67,7 @@ class Config {
 
     return Config._(
       geminiApiKey: require('GEMINI_API_KEY'),
+      groqApiKey: env['GROQ_API_KEY'],
       serpapiKey: require('SERPAPI_KEY'),
       telegramBotToken: require('TG_BOT_TOKEN'),
       telegramChatId: require('TG_CHAT_ID'),

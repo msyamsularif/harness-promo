@@ -1,3 +1,11 @@
+/// Normalizes a merchant name for grouping/dedup purposes (case- and
+/// whitespace-insensitive), so "Kopi Kenangan", "KOPI KENANGAN ", and
+/// "Kopi  Kenangan" are treated as the same merchant. Used to group
+/// several promos from one merchant into a single Telegram section and
+/// to share one buzz check across them.
+String merchantGroupKey(String merchant) =>
+    merchant.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
 /// A single promo item extracted by Gemini, later enriched with a social
 /// media "buzz" signal (added by SocialBuzzChecker, not by Gemini itself).
 ///

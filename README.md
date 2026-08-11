@@ -77,6 +77,7 @@ implementation used to force Gemini's responses into the structure you
 defined. The project will not compile without this generated file.
 
 Fill in `.env` with:
+
 - `GEMINI_API_KEY` — free from [Google AI Studio](https://aistudio.google.com/apikey), no credit card needed
 - `SERPAPI_KEY` — from your [serpapi.com](https://serpapi.com/manage-api-key) dashboard
 - `TG_BOT_TOKEN` — your Telegram bot token (via `@BotFather`)
@@ -104,8 +105,8 @@ noticeable on such a small device. Compile to native binaries first (two
 separate binaries, one per entry point):
 
 ```bash
-dart compile exe bin/harness.dart -o harness_promo
-dart compile exe bin/bot_listener.dart -o bot_listener
+dart compile exe --target-os=linux --target-arch=x64 bin/harness.dart -o harness_promo
+dart compile exe --target-os=linux --target-arch=x64 bin/bot_listener.dart -o bot_listener
 ```
 
 Copy both binaries to the STB, in the same working folder, e.g.
@@ -157,10 +158,13 @@ category (F&B with 3 sub-sections, Lifestyle as one).
 
 **Result quality per sub-category**, enforced via prompt instructions to
 Gemini (in `lib/flows/promo_flow.dart`) plus safety nets in code:
+
 - **Cross-source deduplication**: the same promo found via multiple links is merged into one entry.
 - **Link accuracy**: the saved source link must genuinely discuss that specific promo, not a generic link.
 - **Big-brand priority**: promos from large, well-known merchants are prioritized.
-- **Max 10 promos** per sub-category (enforced via prompt & `.take(10)` in code).
+- **Expired promos are excluded**: promos whose expiry date is before the search date are dropped (prompt instruction + code safety net via the normalized `expiryDateIso` schema field). Promos expiring ON the search day itself are still shown; promos with no stated expiry date are kept.
+- **Merchant grouping**: several distinct promos from the same merchant are kept, but rendered as ONE section on Telegram (each promo with its own details & source link, buzz shown once per merchant) and count as one slot toward the cap below — so one very active brand can't eat the whole sub-category quota.
+- **Max 10 merchants** per sub-category (enforced via prompt & merchant-grouping + `.take()` in code).
 
 **Weekly search region** (cron) is set via `REGION`, default
 `Jabodetabek`:
@@ -249,13 +253,14 @@ SerpApi is registered as a **tool** that Gemini calls itself.
 **Why split into TWO `generate()` calls, not one:**
 Combining tool calling (`toolNames`) with structured output
 (`outputSchema`) in a single call is **not supported by the Gemini API
-itself**. The error is explicit: *"Function calling with a response mime
-type: 'application/json' is unsupported"*. So it has to be split:
+itself**. The error is explicit: _"Function calling with a response mime
+type: 'application/json' is unsupported"_. So it has to be split:
 
-- **PHASE 1 (research)** — tool calling enabled (`toolNames: ['searchPromo']`), Gemini is free to call the `searchPromo` tool multiple times with different keywords, final answer is free-form text (not JSON).
+- **PHASE 1 (research)** — tool calling enabled (`toolNames: ['searchPromo']`), Gemini may call the `searchPromo` tool up to twice (`maxTurns: 3`, see the note below), final answer is free-form text (not JSON).
 - **PHASE 2 (structuring)** — no tools, only `outputSchema: PromoExtractionResult.$schema` — the sole job here is turning phase 1's text into structured data. The prompt explicitly forbids adding/inventing new information at this stage — pure reformatting.
 
 **How the `searchPromo` tool works** (in `lib/flows/promo_flow.dart`):
+
 ```dart
 _ai.defineTool(
   name: 'searchPromo',
@@ -269,8 +274,8 @@ _ai.defineTool(
 ```
 
 Phase 1's prompt gives a **suggested starting keyword** (from
-`categorySearchHints` in `lib/core/promo_orchestrator.dart`), but Gemini is
-free to call `searchPromo` repeatedly with other keywords if it thinks the
+`categorySearchHints` in `lib/core/promo_orchestrator.dart`), and Gemini
+may call `searchPromo` a second time with other keywords if it thinks the
 first result is insufficient — e.g. trying to include a well-known big
 brand name popular in that category, or a variation of promo-related
 terms. Search queries themselves are written in Bahasa Indonesia (per the
@@ -278,16 +283,19 @@ prompt instructions), since we're searching for Indonesian-language promo
 content.
 
 **Practical consequences of this two-phase design:**
-- **2x Gemini calls per sub-category** (not 1x) — for 4 sub-categories/week, that's 8 Gemini calls per week (still well within `gemini-2.5-flash`'s free tier limits).
-- Phase 1 itself may call the `searchPromo` tool several times (Gemini decides), so the total SerpApi calls per sub-category isn't fixed — it depends on how much Gemini feels it needs to dig further.
+
+- **2x Gemini calls per sub-category** (not 1x) — for 4 sub-categories/week, that's 8 Gemini calls per week at baseline (still well within `gemini-2.5-flash`'s free tier limits).
+- Phase 1 may call the `searchPromo` tool more than once, but it is CAPPED: `maxTurns: 3` (= the initial request + at most 2 search rounds), and the prompt tells Gemini the same budget ("AT MOST TWICE"). Worst case is therefore 4 Gemini calls + 2 SerpApi calls per sub-category — not an unbounded agent loop.
+- Both `generate()` calls use Genkit's `retry` middleware (`RetryPlugin` registered in `PromoFlow`), so a transient Gemini 429/RESOURCE_EXHAUSTED is retried with exponential backoff instead of aborting the whole run.
+- Sub-category failures are isolated in `PromoOrchestrator`: one failing sub-category (rate limit, max-turns abort, etc.) is logged & skipped so the rest are still delivered; the run only errors out if EVERY sub-category failed.
 - If you need a hard, predictable call count later, the simplest option is reverting to the old pattern (manual pre-fetch, no tool calling) — but that sacrifices the adaptive behavior that motivated this change in the first place.
 
-**Known open question:** how many times Gemini is allowed to call a tool
-before stopping (called `maxTurns` in JS Genkit) hasn't been confirmed by
-name/support in Genkit Dart, so it's intentionally left unset — relying on
-the library's default. If Gemini ends up calling the tool too many times
-(burning SerpApi quota) or stops too early, this is the first parameter to
-check.
+**Note on `maxTurns`:** it IS supported in Genkit Dart (confirmed in
+genkit 0.15.1 — `generate(..., maxTurns: N)`; the library default is 5,
+and exceeding the cap throws a `GenkitException` with status ABORTED
+rather than returning partial text). This flow sets it to 3 explicitly.
+If Gemini ever needs more/fewer search rounds, adjust that parameter
+together with the "SEARCH BUDGET" line in the phase-1 prompt.
 
 ## 9. Dead link filtering
 
@@ -296,6 +304,7 @@ Before a promo is shown, its `sourceLink` is checked for reachability
 promo** is dropped — not just the link.
 
 **How it works:**
+
 - Tries a `HEAD` request first (cheaper), falls back to `GET` if `HEAD`
   fails outright or returns a non-acceptable status (some servers reject
   `HEAD` but serve `GET` fine).
@@ -311,6 +320,7 @@ promo** is dropped — not just the link.
 **If this causes too many false negatives** (e.g. your network is behind
 a firewall/proxy that blocks outgoing requests to certain sites), disable
 it via `.env`:
+
 ```
 ENABLE_LINK_VALIDATION=false
 ```
@@ -326,16 +336,19 @@ YouTube, X, and Threads** — shown on Telegram as:
 ```
 
 **How it works & its limitations (important to understand):**
-- The query used is `"<merchant name>" promo (site:instagram.com OR site:tiktok.com OR ...)` — ONE combined query covering all six platforms at once, not 6 separate queries. This is a deliberate cost decision: 6 separate queries per promo x ~40 promos/week = 240 extra SerpApi calls/week, versus ~40 extra calls/week with the combined approach.
+
+- The query used is `"<merchant name>" promo (site:instagram.com OR site:tiktok.com OR ...)` — ONE combined query covering all six platforms at once, not 6 separate queries. This is a deliberate cost decision: 6 separate queries per promo x ~40 promos/week = 240 extra SerpApi calls/week, versus ~40 extra calls/week with the combined approach (fewer in practice, since buzz is checked once per UNIQUE merchant — several promos from the same merchant share a single check).
 - Consequence: this signal shows **which platforms mention the brand**, not an exact count per platform.
 - The query searches for the merchant name + the word "promo" generally, not the exact extracted `promoTitle` text — because Gemini's summarized wording rarely matches real social captions word-for-word. So this is a signal for how much the **brand** is being discussed in relation to promos, not confirmation that this exact promo is what's trending.
 - Score labels: 0 results = "Belum ramai dibicarakan", 1-3 = "Mulai dibicarakan", 4-7 = "Cukup ramai", 8+ = "Sangat ramai 🔥".
 - Buzz checks run in parallel per batch, so they don't add a large linear delay.
 
 **If SerpApi quota becomes a problem**, disable via `.env`:
+
 ```
 ENABLE_BUZZ_CHECK=false
 ```
+
 Promos are still sent as usual, just without the buzz signal line.
 
 **If you need an exact per-platform breakdown** later (not just "which
@@ -351,5 +364,4 @@ SerpApi quota/budget first.
   dart run build_runner build --delete-conflicting-outputs
   ```
 - **Gemini free tier rate limits**: the weekly summary plus a handful of on-demand requests per week is still well below the free tier limit.
-- **Automatic retries**: for more resilience against transient network errors, Genkit Dart has `RetryMiddleware` that can be added to the plugin configuration.
 - **Cross-week deduplication**: history is already saved in `harness-data/*.json`, but nothing currently reads it back to avoid re-sending a promo that's still running from a previous week — this would be a natural next step if repeat notifications become annoying.

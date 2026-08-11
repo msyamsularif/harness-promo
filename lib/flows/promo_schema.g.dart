@@ -23,6 +23,7 @@ base class PromoItemSchema {
     required String discount,
     required String terms,
     required String expiryDate,
+    required String expiryDateIso,
     required String sourceLink,
   }) {
     _json = {
@@ -32,6 +33,7 @@ base class PromoItemSchema {
       'discount': discount,
       'terms': terms,
       'expiryDate': expiryDate,
+      'expiryDateIso': expiryDateIso,
       'sourceLink': sourceLink,
     };
   }
@@ -90,6 +92,14 @@ base class PromoItemSchema {
     _json['expiryDate'] = value;
   }
 
+  String get expiryDateIso {
+    return _json['expiryDateIso'] as String;
+  }
+
+  set expiryDateIso(String value) {
+    _json['expiryDateIso'] = value;
+  }
+
   String get sourceLink {
     return _json['sourceLink'] as String;
   }
@@ -146,6 +156,10 @@ base class _PromoItemSchemaTypeFactory extends SchemanticType<PromoItemSchema> {
               description:
                   'Date the promo expires, written in Bahasa Indonesia. Use exactly "Tidak disebutkan" if not mentioned in the source',
             ),
+            'expiryDateIso': $Schema.string(
+              description:
+                  'The same expiry date as "expiryDate", but normalized to ISO 8601 format YYYY-MM-DD (e.g. "2026-08-31") so it can be compared programmatically. Use an empty string "" if the expiry date is not mentioned or unclear in the source',
+            ),
             'sourceLink': $Schema.string(
               description:
                   'Source URL where this promo was found, copied exactly from the search result',
@@ -158,8 +172,10 @@ base class _PromoItemSchemaTypeFactory extends SchemanticType<PromoItemSchema> {
             'discount',
             'terms',
             'expiryDate',
+            'expiryDateIso',
             'sourceLink',
           ],
+          additionalProperties: false,
         ).value,
         dependencies: [],
       );
@@ -226,6 +242,7 @@ base class _PromoExtractionResultTypeFactory
             ),
           },
           required: ['promos'],
+          additionalProperties: false,
         ).value,
         dependencies: [PromoItemSchema.$schema],
       );

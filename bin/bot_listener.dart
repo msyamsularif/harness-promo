@@ -30,7 +30,10 @@ Future<void> main() async {
   }
 
   final serpapi = SerpApiClient(apiKey: config.serpapiKey);
-  final promoFlow = PromoFlow(geminiApiKey: config.geminiApiKey, serpapi: serpapi);
+  final promoFlow = PromoFlow(
+      geminiApiKey: config.geminiApiKey,
+      groqApiKey: config.groqApiKey,
+      serpapi: serpapi);
   final orchestrator = PromoOrchestrator(
     serpapi: serpapi,
     promoFlow: promoFlow,

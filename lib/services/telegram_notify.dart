@@ -123,27 +123,44 @@ class TelegramNotify {
               '${_subCategoryEmoji(category)} <b>${_escapeHtml(category)}</b> (${items.length})\n');
         }
 
-        for (var i = 0; i < items.length; i++) {
-          final p = items[i];
-          final entry = StringBuffer()
-            ..writeln('<b>${i + 1}. ${_escapeHtml(p.merchant)}</b>')
-            ..writeln('💰 Diskon: ${_escapeHtml(p.discount)}')
-            ..writeln('📝 Promo: ${_escapeHtml(p.promoTitle)}');
+        // Group by merchant (insertion order preserved): several promos
+        // from the same merchant are rendered as ONE numbered section —
+        // each promo keeps its own details + source link, the buzz line
+        // (a brand-level signal) is shown once for the whole merchant.
+        final merchantGroups = <String, List<Promo>>{};
+        final merchantNames = <String, String>{};
+        for (final p in items) {
+          final key = merchantGroupKey(p.merchant);
+          merchantGroups.putIfAbsent(key, () => []).add(p);
+          merchantNames.putIfAbsent(key, () => p.merchant.trim());
+        }
 
-          entry.writeln(
-            '📋 S&amp;K: ${p.terms.isNotEmpty ? _escapeHtml(p.terms) : 'Tidak disebutkan di sumber'}',
-          );
-          entry.writeln('⏰ Berlaku s/d: ${_escapeHtml(p.expiryDate)}');
+        var sectionNumber = 0;
+        for (final group in merchantGroups.entries) {
+          sectionNumber++;
+          final merchantPromos = group.value;
+          final merchantName = merchantNames[group.key]!;
 
-          if (p.buzzScore >= 0) {
-            final platformsStr = p.buzzPlatforms.isNotEmpty
-                ? ' (${p.buzzPlatforms.join(", ")})'
-                : '';
-            entry.writeln('📊 ${_escapeHtml(p.buzzLabel)}$platformsStr');
-          }
-
-          if (p.sourceLink.isNotEmpty) {
-            entry.writeln('🔗 <a href="${_escapeHtml(p.sourceLink)}">Lihat sumber</a>');
+          final entry = StringBuffer();
+          if (merchantPromos.length == 1) {
+            final p = merchantPromos.first;
+            entry.writeln('<b>$sectionNumber. ${_escapeHtml(merchantName)}</b>');
+            entry.writeln('💰 Diskon: ${_escapeHtml(p.discount)}');
+            entry.writeln('📝 Promo: ${_escapeHtml(p.promoTitle)}');
+            _appendTermsAndExpiry(entry, p);
+            _appendBuzz(entry, p);
+            _appendSourceLink(entry, p);
+          } else {
+            entry.writeln(
+                '<b>$sectionNumber. ${_escapeHtml(merchantName)}</b> (${merchantPromos.length} promo)');
+            for (var j = 0; j < merchantPromos.length; j++) {
+              final p = merchantPromos[j];
+              entry.writeln('🔹 <b>Promo ${j + 1}:</b> ${_escapeHtml(p.promoTitle)}');
+              entry.writeln('💰 Diskon: ${_escapeHtml(p.discount)}');
+              _appendTermsAndExpiry(entry, p);
+              _appendSourceLink(entry, p);
+            }
+            _appendBuzz(entry, merchantPromos.first);
           }
           entry.writeln();
 
@@ -161,6 +178,25 @@ class TelegramNotify {
     }
 
     return messages;
+  }
+
+  void _appendTermsAndExpiry(StringBuffer buf, Promo p) {
+    buf.writeln(
+      '📋 S&amp;K: ${p.terms.isNotEmpty ? _escapeHtml(p.terms) : 'Tidak disebutkan di sumber'}',
+    );
+    buf.writeln('⏰ Berlaku s/d: ${_escapeHtml(p.expiryDate)}');
+  }
+
+  void _appendBuzz(StringBuffer buf, Promo p) {
+    if (p.buzzScore < 0) return;
+    final platformsStr =
+        p.buzzPlatforms.isNotEmpty ? ' (${p.buzzPlatforms.join(", ")})' : '';
+    buf.writeln('📊 ${_escapeHtml(p.buzzLabel)}$platformsStr');
+  }
+
+  void _appendSourceLink(StringBuffer buf, Promo p) {
+    if (p.sourceLink.isEmpty) return;
+    buf.writeln('🔗 <a href="${_escapeHtml(p.sourceLink)}">Lihat sumber</a>');
   }
 
   String _parentEmoji(String parent) {

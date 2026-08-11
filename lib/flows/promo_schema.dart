@@ -25,6 +25,9 @@ abstract class $PromoItemSchema {
   @Field(description: 'Date the promo expires, written in Bahasa Indonesia. Use exactly "Tidak disebutkan" if not mentioned in the source')
   String get expiryDate;
 
+  @Field(description: 'The same expiry date as "expiryDate", but normalized to ISO 8601 format YYYY-MM-DD (e.g. "2026-08-31") so it can be compared programmatically. Use an empty string "" if the expiry date is not mentioned or unclear in the source')
+  String get expiryDateIso;
+
   @Field(description: 'Source URL where this promo was found, copied exactly from the search result')
   String get sourceLink;
 }

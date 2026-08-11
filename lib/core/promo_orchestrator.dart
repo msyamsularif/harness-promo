@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import '../flows/promo_flow.dart';
 import '../models/promo.dart';
 import '../services/link_validator.dart';
@@ -55,27 +57,22 @@ class PromoOrchestrator {
   /// Gemini decides the actual search query via the `searchPromo` tool;
   /// deduplication and the max-10-per-sub-category cap are also handled
   /// by Gemini inside PromoFlow.
+  ///
+  /// Failures are ISOLATED per sub-category: if one sub-category's
+  /// extraction throws (e.g. Gemini rate limit, max-turns abort), it is
+  /// logged and skipped so the remaining sub-categories are still
+  /// delivered. Only if EVERY sub-category fails does this rethrow, so
+  /// the caller sends an error notification instead of a misleading
+  /// "no promos found" summary.
   Future<List<Promo>> runDefault({required String region}) async {
-    final allPromos = <Promo>[];
-
-    for (final entry in categorySearchHints.entries) {
-      final category = entry.key;
-      final searchHint = entry.value;
-
-      final promos = await promoFlow.extract(
-        category,
-        region,
-        searchHint: searchHint,
-      );
-      allPromos.addAll(await _enrich(promos));
-    }
-
-    return allPromos;
+    return _runForCategories(categorySearchHints, region);
   }
 
   /// Used by the bot listener: finds promos for a specific [location] per
   /// the user's on-demand request, for the requested sub-categories only
   /// ([categoryList] null or empty means all sub-categories).
+  ///
+  /// Same per-sub-category failure isolation as [runDefault].
   Future<List<Promo>> runForLocation(
     String location, {
     List<String>? categoryList,
@@ -84,18 +81,47 @@ class PromoOrchestrator {
         ? categorySearchHints.keys.toList()
         : categoryList;
 
+    final hints = <String, String>{
+      for (final category in targetCategories)
+        if (categorySearchHints.containsKey(category))
+          category: categorySearchHints[category]!,
+    };
+
+    return _runForCategories(hints, location);
+  }
+
+  /// Shared loop behind [runDefault] and [runForLocation]: extracts and
+  /// enriches one sub-category at a time, isolating failures per
+  /// sub-category (see [runDefault]'s docs). Rethrows when all of the
+  /// requested sub-categories failed.
+  Future<List<Promo>> _runForCategories(
+    Map<String, String> hintsByCategory,
+    String region,
+  ) async {
     final allPromos = <Promo>[];
+    final failures = <String>[];
 
-    for (final category in targetCategories) {
-      final searchHint = categorySearchHints[category];
-      if (searchHint == null) continue; // unknown sub-category, skip
+    for (final entry in hintsByCategory.entries) {
+      final category = entry.key;
+      final searchHint = entry.value;
 
-      final promos = await promoFlow.extract(
-        category,
-        location,
-        searchHint: searchHint,
-      );
-      allPromos.addAll(await _enrich(promos));
+      try {
+        final promos = await promoFlow.extract(
+          category,
+          region,
+          searchHint: searchHint,
+        );
+        allPromos.addAll(await _enrich(promos));
+      } catch (e) {
+        stderr.writeln(
+            '[orchestrator] Extraction failed for category "$category", skipping: $e');
+        failures.add(category);
+      }
+    }
+
+    if (failures.isNotEmpty && failures.length == hintsByCategory.length) {
+      throw Exception(
+          'All ${failures.length} sub-category extractions failed; nothing to deliver.');
     }
 
     return allPromos;
@@ -103,6 +129,11 @@ class PromoOrchestrator {
 
   /// Runs link validation (drop unreachable sources) and buzz checking
   /// (both optional, both parallelized) on a batch of promos.
+  ///
+  /// Buzz is checked ONCE per unique merchant and the result is shared by
+  /// all of that merchant's promos: the buzz query is merchant-based, so
+  /// checking each promo individually would return identical results while
+  /// burning extra SerpApi quota.
   Future<List<Promo>> _enrich(List<Promo> promos) async {
     var result = promos;
 
@@ -111,7 +142,28 @@ class PromoOrchestrator {
     }
 
     if (enableBuzzCheck && result.isNotEmpty) {
-      result = await Future.wait(result.map(_buzzChecker.checkBuzz));
+      final representativeByMerchant = <String, Promo>{};
+      for (final p in result) {
+        representativeByMerchant.putIfAbsent(
+            merchantGroupKey(p.merchant), () => p);
+      }
+
+      final checked = await Future.wait(
+        representativeByMerchant.entries.map(
+          (entry) async =>
+              MapEntry(entry.key, await _buzzChecker.checkBuzz(entry.value)),
+        ),
+      );
+      final buzzByMerchant = {for (final e in checked) e.key: e.value};
+
+      result = result.map((p) {
+        final buzz = buzzByMerchant[merchantGroupKey(p.merchant)]!;
+        return p.copyWithBuzz(
+          buzzScore: buzz.buzzScore,
+          buzzLabel: buzz.buzzLabel,
+          buzzPlatforms: buzz.buzzPlatforms,
+        );
+      }).toList();
     }
 
     return result;
