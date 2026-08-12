@@ -1,6 +1,12 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 
+/// Abstract interface for promo search services. Allows swapping SerpApi
+/// for a different backend without changing consumers.
+abstract class SearchService {
+  Future<List<SearchResult>> search(String query, {int maxResults = 10});
+}
+
 /// A single raw search result from SerpApi, before it's summarized by AI.
 class SearchResult {
   final String title;
@@ -13,9 +19,11 @@ class SearchResult {
   String toString() => 'Title: $title\nSnippet: $snippet\nLink: $link';
 }
 
-class SerpApiClient {
+class SerpApiClient implements SearchService {
   final String apiKey;
   final http.Client _http;
+
+  static const _timeout = Duration(seconds: 30);
 
   SerpApiClient({required this.apiKey, http.Client? httpClient})
       : _http = httpClient ?? http.Client();
@@ -25,6 +33,7 @@ class SerpApiClient {
   ///
   /// [query] e.g. "promo makanan minuman terbaru Indonesia".
   /// [maxResults] number of top results to fetch (default 10).
+  @override
   Future<List<SearchResult>> search(String query, {int maxResults = 10}) async {
     final uri = Uri.https('serpapi.com', '/search.json', {
       'engine': 'google',
@@ -37,7 +46,7 @@ class SerpApiClient {
       'api_key': apiKey,
     });
 
-    final res = await _http.get(uri);
+    final res = await _http.get(uri).timeout(_timeout);
 
     if (res.statusCode != 200) {
       throw Exception(
@@ -50,7 +59,7 @@ class SerpApiClient {
       throw Exception('SerpApi error for query "$query": ${body['error']}');
     }
 
-    final organic = (body['organic_results'] as List?) ?? [];
+    final organic = (body['organic_results'] as List<dynamic>?) ?? [];
 
     return organic.map((item) {
       final map = item as Map<String, dynamic>;

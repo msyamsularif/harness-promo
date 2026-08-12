@@ -3,8 +3,10 @@
 /// "Kopi  Kenangan" are treated as the same merchant. Used to group
 /// several promos from one merchant into a single Telegram section and
 /// to share one buzz check across them.
-String merchantGroupKey(String merchant) =>
-    merchant.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+extension PromoMerchantKey on Promo {
+  String get merchantKey =>
+      merchant.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+}
 
 /// A single promo item extracted by Gemini, later enriched with a social
 /// media "buzz" signal (added by SocialBuzzChecker, not by Gemini itself).
@@ -75,7 +77,7 @@ class Promo {
       sourceLink: json['source_link']?.toString() ?? '',
       buzzScore: json['buzz_score'] is int ? json['buzz_score'] as int : -1,
       buzzLabel: json['buzz_label']?.toString() ?? 'Belum dicek',
-      buzzPlatforms: (json['buzz_platforms'] as List?)
+      buzzPlatforms: (json['buzz_platforms'] as List<dynamic>?)
               ?.map((e) => e.toString())
               .toList() ??
           const [],

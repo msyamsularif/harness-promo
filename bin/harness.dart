@@ -25,7 +25,7 @@ Future<void> main() async {
       groqApiKey: config.groqApiKey,
       serpapi: serpapi);
   final orchestrator = PromoOrchestrator(
-    serpapi: serpapi,
+    search: serpapi,
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
@@ -48,7 +48,6 @@ Future<void> main() async {
 
     await telegram.sendPromoSummary(
       allPromos,
-      title: 'Rangkuman Promo Mingguan',
       subtitle: config.region,
     );
     stdout.writeln('[harness] Telegram notification sent. Done.');

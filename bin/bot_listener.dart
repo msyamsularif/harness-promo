@@ -1,13 +1,125 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:http/http.dart' as http;
-
 import 'package:harness/config.dart';
 import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
 import 'package:harness/services/serpapi_client.dart';
 import 'package:harness/services/telegram_notify.dart';
+import 'package:http/http.dart' as http;
+
+/// Parses and executes incoming bot commands, separating command logic
+/// from the long-polling loop.
+class BotCommandHandler {
+  final PromoOrchestrator _orchestrator;
+  final TelegramNotify _telegram;
+
+  BotCommandHandler({
+    required PromoOrchestrator orchestrator,
+    required TelegramNotify telegram,
+  })  : _orchestrator = orchestrator,
+        _telegram = telegram;
+
+  Future<void> handle(String text) async {
+    if (text.startsWith('/help') || text.startsWith('/start')) {
+      await _telegram.sendPlainMessage(_helpText);
+      return;
+    }
+
+    if (!text.startsWith('/promo')) {
+      // Ignore messages that aren't a recognized command, so the bot
+      // doesn't reply noisily to every casual chat.
+      return;
+    }
+
+    final args = text.replaceFirst('/promo', '').trim();
+    if (args.isEmpty) {
+      await _telegram.sendPlainMessage(
+        'Format: <code>/promo &lt;lokasi&gt; [fnb|makanan|minuman|jajanan|lifestyle]</code>\n'
+        'Contoh: <code>/promo Bandung</code>\n'
+        'Contoh: <code>/promo Surabaya fnb</code>\n'
+        'Contoh: <code>/promo Malang minuman</code>',
+      );
+      return;
+    }
+
+    final parts = args.split(RegExp(r'\s+'));
+    List<String>? categoryFilter;
+    var locationParts = parts;
+
+    final lastWord = parts.last.toLowerCase();
+    switch (lastWord) {
+      case 'fnb':
+      case 'f&b':
+        categoryFilter = ['Makanan', 'Minuman', 'Jajanan'];
+        locationParts = parts.sublist(0, parts.length - 1);
+        break;
+      case 'makanan':
+        categoryFilter = ['Makanan'];
+        locationParts = parts.sublist(0, parts.length - 1);
+        break;
+      case 'minuman':
+        categoryFilter = ['Minuman'];
+        locationParts = parts.sublist(0, parts.length - 1);
+        break;
+      case 'jajanan':
+        categoryFilter = ['Jajanan'];
+        locationParts = parts.sublist(0, parts.length - 1);
+        break;
+      case 'lifestyle':
+        categoryFilter = ['Lifestyle'];
+        locationParts = parts.sublist(0, parts.length - 1);
+        break;
+    }
+
+    final location = locationParts.join(' ').trim();
+    if (location.isEmpty) {
+      await _telegram.sendPlainMessage(
+          'Lokasi tidak boleh kosong. Contoh: <code>/promo Bandung</code>');
+      return;
+    }
+
+    final categoryLabel =
+        categoryFilter != null ? ' (${categoryFilter.join(', ')})' : '';
+    await _telegram.sendPlainMessage(
+        '🔎 Mencari promo untuk "$location"$categoryLabel... mohon tunggu sebentar.');
+
+    try {
+      final promos = await _orchestrator.runForLocation(
+        location,
+        categoryList: categoryFilter,
+      );
+
+      await _telegram.sendPromoSummary(
+        promos,
+        title: 'Promo untuk "$location"',
+        subtitle: 'Hasil pencarian on-demand',
+      );
+    } catch (e) {
+      await _telegram.sendError('Gagal mencari promo untuk "$location": $e');
+    }
+  }
+}
+
+const _helpText = '''
+🤖 <b>Harness Promo Bot</b>
+
+Perintah yang tersedia:
+<code>/promo &lt;lokasi&gt;</code> — cari semua kategori (Makanan, Minuman, Jajanan, Lifestyle)
+<code>/promo &lt;lokasi&gt; fnb</code> — cari Makanan, Minuman, &amp; Jajanan saja
+<code>/promo &lt;lokasi&gt; makanan</code> — cari promo Makanan saja
+<code>/promo &lt;lokasi&gt; minuman</code> — cari promo Minuman (termasuk kopi) saja
+<code>/promo &lt;lokasi&gt; jajanan</code> — cari promo Jajanan/snack saja
+<code>/promo &lt;lokasi&gt; lifestyle</code> — cari promo Lifestyle saja
+
+Contoh:
+<code>/promo Bandung</code>
+<code>/promo Surabaya fnb</code>
+<code>/promo Malang minuman</code>
+
+Catatan: rangkuman mingguan otomatis (wilayah Jabodetabek) tetap jalan
+terpisah lewat cron, tidak terpengaruh oleh bot ini.
+''';
 
 /// Entry point SEPARATE from the weekly cron job (bin/harness.dart).
 ///
@@ -35,7 +147,7 @@ Future<void> main() async {
       groqApiKey: config.groqApiKey,
       serpapi: serpapi);
   final orchestrator = PromoOrchestrator(
-    serpapi: serpapi,
+    search: serpapi,
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
@@ -43,6 +155,10 @@ Future<void> main() async {
   final telegram = TelegramNotify(
     botToken: config.telegramBotToken,
     chatId: config.telegramChatId,
+  );
+  final handler = BotCommandHandler(
+    orchestrator: orchestrator,
+    telegram: telegram,
   );
 
   final offsetFile = File('.bot_offset');
@@ -72,11 +188,11 @@ Future<void> main() async {
         if (msgChatId != config.telegramChatId) continue;
         if (text.isEmpty) continue;
 
-        await _handleCommand(text, orchestrator, telegram);
+        await handler.handle(text);
       }
     } catch (e, st) {
       stderr.writeln('[bot_listener] Error while polling: $e\n$st');
-      await Future.delayed(const Duration(seconds: 5));
+      await Future<void>.delayed(const Duration(seconds: 5));
     }
   }
 }
@@ -97,104 +213,3 @@ Future<List<dynamic>> _getUpdates(String token, int offset) async {
   final body = jsonDecode(res.body) as Map<String, dynamic>;
   return (body['result'] as List<dynamic>?) ?? [];
 }
-
-Future<void> _handleCommand(
-  String text,
-  PromoOrchestrator orchestrator,
-  TelegramNotify telegram,
-) async {
-  if (text.startsWith('/help') || text.startsWith('/start')) {
-    await telegram.sendPlainMessage(_helpText());
-    return;
-  }
-
-  if (!text.startsWith('/promo')) {
-    // Ignore messages that aren't a recognized command, so the bot
-    // doesn't reply noisily to every casual chat.
-    return;
-  }
-
-  final args = text.replaceFirst('/promo', '').trim();
-  if (args.isEmpty) {
-    await telegram.sendPlainMessage(
-      'Format: <code>/promo &lt;lokasi&gt; [fnb|makanan|minuman|jajanan|lifestyle]</code>\n'
-      'Contoh: <code>/promo Bandung</code>\n'
-      'Contoh: <code>/promo Surabaya fnb</code>\n'
-      'Contoh: <code>/promo Malang minuman</code>',
-    );
-    return;
-  }
-
-  final parts = args.split(RegExp(r'\s+'));
-  List<String>? categoryFilter;
-  var locationParts = parts;
-
-  final lastWord = parts.last.toLowerCase();
-  switch (lastWord) {
-    case 'fnb':
-    case 'f&b':
-      categoryFilter = ['Makanan', 'Minuman', 'Jajanan'];
-      locationParts = parts.sublist(0, parts.length - 1);
-      break;
-    case 'makanan':
-      categoryFilter = ['Makanan'];
-      locationParts = parts.sublist(0, parts.length - 1);
-      break;
-    case 'minuman':
-      categoryFilter = ['Minuman'];
-      locationParts = parts.sublist(0, parts.length - 1);
-      break;
-    case 'jajanan':
-      categoryFilter = ['Jajanan'];
-      locationParts = parts.sublist(0, parts.length - 1);
-      break;
-    case 'lifestyle':
-      categoryFilter = ['Lifestyle'];
-      locationParts = parts.sublist(0, parts.length - 1);
-      break;
-  }
-
-  final location = locationParts.join(' ').trim();
-  if (location.isEmpty) {
-    await telegram.sendPlainMessage('Lokasi tidak boleh kosong. Contoh: <code>/promo Bandung</code>');
-    return;
-  }
-
-  final categoryLabel = categoryFilter != null ? ' (${categoryFilter.join(", ")})' : '';
-  await telegram.sendPlainMessage('🔎 Mencari promo untuk "$location"$categoryLabel... mohon tunggu sebentar.');
-
-  try {
-    final promos = await orchestrator.runForLocation(
-      location,
-      categoryList: categoryFilter,
-    );
-
-    await telegram.sendPromoSummary(
-      promos,
-      title: 'Promo untuk "$location"',
-      subtitle: 'Hasil pencarian on-demand',
-    );
-  } catch (e) {
-    await telegram.sendError('Gagal mencari promo untuk "$location": $e');
-  }
-}
-
-String _helpText() => '''
-🤖 <b>Harness Promo Bot</b>
-
-Perintah yang tersedia:
-<code>/promo &lt;lokasi&gt;</code> — cari semua kategori (Makanan, Minuman, Jajanan, Lifestyle)
-<code>/promo &lt;lokasi&gt; fnb</code> — cari Makanan, Minuman, &amp; Jajanan saja
-<code>/promo &lt;lokasi&gt; makanan</code> — cari promo Makanan saja
-<code>/promo &lt;lokasi&gt; minuman</code> — cari promo Minuman (termasuk kopi) saja
-<code>/promo &lt;lokasi&gt; jajanan</code> — cari promo Jajanan/snack saja
-<code>/promo &lt;lokasi&gt; lifestyle</code> — cari promo Lifestyle saja
-
-Contoh:
-<code>/promo Bandung</code>
-<code>/promo Surabaya fnb</code>
-<code>/promo Malang minuman</code>
-
-Catatan: rangkuman mingguan otomatis (wilayah Jabodetabek) tetap jalan
-terpisah lewat cron, tidak terpengaruh oleh bot ini.
-''';

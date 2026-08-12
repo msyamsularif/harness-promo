@@ -13,9 +13,9 @@ import 'serpapi_client.dart';
 /// If you need an exact per-platform breakdown later, that requires
 /// upgrading to separate queries (and automatically 6x the SerpApi cost).
 class SocialBuzzChecker {
-  final SerpApiClient serpapi;
+  final SearchService _search;
 
-  SocialBuzzChecker({required this.serpapi});
+  SocialBuzzChecker({required SearchService search}) : _search = search;
 
   static const _platformHosts = {
     'instagram.com': 'Instagram',
@@ -42,7 +42,7 @@ class SocialBuzzChecker {
         'site:twitter.com OR site:threads.net)';
 
     try {
-      final results = await serpapi.search(query, maxResults: 10);
+      final results = await _search.search(query);
 
       final platforms = <String>{};
       for (final r in results) {

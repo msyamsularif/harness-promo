@@ -1,0 +1,23 @@
+analyzer:
+  language:
+    strict-casts: true
+    strict-inference: true
+    strict-raw-types: true
+  errors:
+    missing_return: error
+    dead_code: warning
+
+linter:
+  rules:
+    - always_declare_return_types
+    - avoid_redundant_argument_values
+    - camel_case_types
+    - cancel_subscriptions
+    - curly_braces_in_flow_control_structures
+    - directives_ordering
+    - prefer_const_constructors
+    - prefer_const_declarations
+    - prefer_final_locals
+    - prefer_single_quotes
+    - unnecessary_brace_in_string_interps
+    - unnecessary_late

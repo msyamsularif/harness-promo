@@ -56,6 +56,7 @@ class PromoFlow {
   /// section). Enforced both via prompt instructions AND as a safety net
   /// via merchant-grouping + `.take()` in code.
   static const _maxPromoPerCategory = 10;
+
   PromoFlow(
       {required String geminiApiKey,
       String? groqApiKey,
@@ -99,7 +100,7 @@ class PromoFlow {
           'category, or a variation of promo-related terms).',
       inputSchema: SearchPromoInput.$schema,
       fn: (input, _) async {
-        final results = await _serpapi.search(input.query, maxResults: 10);
+        final results = await _serpapi.search(input.query);
         if (results.isEmpty) {
           return 'No search results found for this query.';
         }
@@ -111,7 +112,8 @@ class PromoFlow {
     );
   }
 
-  ModelRef _groqModel() => openAI.model(_fallbackModel, namespace: 'groq');
+  ModelRef<dynamic> _groqModel() =>
+      openAI.model(_fallbackModel, namespace: 'groq');
 
   /// Groq fallback: calls SerpApi directly (no Genkit tool calling),
   /// then asks GPT-OSS to extract structured promos from raw search text.
@@ -126,7 +128,6 @@ class PromoFlow {
   ) async {
     final searchResults = await _serpapi.search(
       '$searchHint $region minggu ini',
-      maxResults: 10,
     );
     if (searchResults.isEmpty) return [];
 
@@ -167,7 +168,7 @@ Rules:
 - Only output the JSON object, nothing else.
 ''';
 
-    final response = await _ai.generate(
+    final response = await _ai.generate<dynamic, String>(
       model: _groqModel(),
       prompt: prompt,
       use: [retry()],
@@ -180,23 +181,21 @@ Rules:
     try {
       final json = _extractJson(text);
       if (json == null) return [];
-      final list = json['promos'] as List?;
+      final list = json['promos'] as List<dynamic>?;
       if (list == null || list.isEmpty) return [];
 
       final byMerchant = <String, List<PromoItemSchema>>{};
       for (final itemJson in list) {
-        if (itemJson is! Map) continue;
+        if (itemJson is! Map<String, dynamic>) continue;
         try {
-          final item = PromoItemSchema.fromJson(
-            Map<String, dynamic>.from(itemJson),
-          );
+          final item = PromoItemSchema.fromJson(itemJson);
           final parsed = DateTime.tryParse(item.expiryDateIso.trim());
           if (parsed != null) {
             final expiry = DateTime(parsed.year, parsed.month, parsed.day);
             if (expiry.isBefore(today)) continue;
           }
           byMerchant
-              .putIfAbsent(merchantGroupKey(item.merchant), () => [])
+              .putIfAbsent(_itemKey(item.merchant), () => [])
               .add(item);
         } catch (_) {
           // Skip malformed items
@@ -213,6 +212,10 @@ Rules:
       return [];
     }
   }
+
+  /// Simple merchant key for schema items (doesn't have the Promo extension).
+  String _itemKey(String merchant) =>
+      merchant.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
 
   Map<String, dynamic>? _extractJson(String text) {
     try {
@@ -284,7 +287,7 @@ Once you feel the search results are sufficient, write a summary of the promos a
 10. If there is no valid promo at all, clearly state that no promo was found for this category.
 ''';
 
-    final researchResponse = await _ai.generate(
+    final researchResponse = await _ai.generate<dynamic, String>(
       model: googleAI.gemini(_modelName),
       prompt: researchPrompt,
       toolNames: ['searchPromo'],
@@ -334,7 +337,7 @@ Turn the summary above into structured data following the given schema. Do NOT a
     final byMerchant = <String, List<PromoItemSchema>>{};
     for (final item in result.promos.where(isStillValid)) {
       byMerchant
-          .putIfAbsent(merchantGroupKey(item.merchant), () => [])
+          .putIfAbsent(_itemKey(item.merchant), () => [])
           .add(item);
     }
 
