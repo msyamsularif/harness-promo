@@ -108,8 +108,8 @@ noticeable on such a small device. Compile to native binaries first (two
 separate binaries, one per entry point):
 
 ```bash
-dart compile exe --target-os=linux --target-arch=x64 bin/harness.dart -o harness_promo
-dart compile exe --target-os=linux --target-arch=x64 bin/bot_listener.dart -o bot_listener
+dart compile exe --target-os=linux --target-arch=arm64 bin/harness.dart -o harness_promo
+dart compile exe --target-os=linux --target-arch=arm64 bin/bot_listener.dart -o bot_listener
 ```
 
 Copy both binaries to the STB, in the same working folder, e.g.
