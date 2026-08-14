@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:harness/config.dart';
 import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
-import 'package:harness/services/serpapi_client.dart';
+import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_notify.dart';
 import 'package:http/http.dart' as http;
 
@@ -141,13 +141,18 @@ Future<void> main() async {
     exit(1);
   }
 
-  final serpapi = SerpApiClient(apiKey: config.serpapiKey);
+  final search = buildSearchClient(
+    tavilyApiKey: config.tavilyApiKey,
+    serperApiKey: config.serperApiKey,
+    serpapiApiKey: config.serpapiKey,
+  );
   final promoFlow = PromoFlow(
       geminiApiKey: config.geminiApiKey,
-      groqApiKey: config.groqApiKey,
-      serpapi: serpapi);
+      openRouterApiKey: config.openRouterApiKey,
+      fallbackModel: config.fallbackModel,
+      search: search);
   final orchestrator = PromoOrchestrator(
-    search: serpapi,
+    search: search,
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,

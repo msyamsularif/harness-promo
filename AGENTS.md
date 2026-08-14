@@ -28,8 +28,8 @@ In `lib/flows/promo_flow.dart`, extraction is deliberately split into TWO `gener
 
 ## Environment / runtime quirks
 
-- `.env` (copy from `.env.example`) is loaded **relative to the working directory** — run binaries from the folder containing `.env` (this is why the crontab line `cd`s first). Required keys: `GEMINI_API_KEY`, `SERPAPI_KEY`, `TG_BOT_TOKEN`, `TG_CHAT_ID`.
-- `ENABLE_BUZZ_CHECK` / `ENABLE_LINK_VALIDATION` toggle the two optional per-promo extra passes (each costs SerpApi quota).
+- `.env` (copy from `.env.example`) is loaded **relative to the working directory** — run binaries from the folder containing `.env` (this is why the crontab line `cd`s first). Required keys: `GEMINI_API_KEY`, `TG_BOT_TOKEN`, `TG_CHAT_ID`. Search providers use a fixed fallback chain **Tavily > Serper > SerpApi** (`lib/services/search_fallback_client.dart`); at least one of `TAVILY_API_KEY` / `SERPER_API_KEY` / `SERPAPI_KEY` must be set, and fallback happens on error/rate-limit only (empty results are treated as "no results").
+- `ENABLE_BUZZ_CHECK` / `ENABLE_LINK_VALIDATION` toggle the two optional per-promo extra passes (each costs a search-provider call).
 - Deployment target is a 2GB RAM Armbian STB via the AOT binaries above — keep dependencies and memory footprint light; don't assume `dart run` is available there.
 
 ## Conventions

@@ -6,8 +6,11 @@ import 'package:dotenv/dotenv.dart';
 /// development) or from OS environment variables (for cron/service runs).
 class Config {
   final String geminiApiKey;
-  final String? groqApiKey;
-  final String serpapiKey;
+  final String? openRouterApiKey;
+  final String? fallbackModel;
+  final String? tavilyApiKey;
+  final String? serperApiKey;
+  final String? serpapiKey;
   final String telegramBotToken;
   final String telegramChatId;
   final String outputDir;
@@ -27,7 +30,10 @@ class Config {
 
   Config._({
     required this.geminiApiKey,
-    required this.groqApiKey,
+    required this.openRouterApiKey,
+    required this.fallbackModel,
+    required this.tavilyApiKey,
+    required this.serperApiKey,
     required this.serpapiKey,
     required this.telegramBotToken,
     required this.telegramChatId,
@@ -65,10 +71,31 @@ class Config {
       return value.trim().toLowerCase() != 'false';
     }
 
+    String? optional(String key) {
+      final value = env[key];
+      if (value == null || value.trim().isEmpty) return null;
+      return value.trim();
+    }
+
+    final tavilyApiKey = optional('TAVILY_API_KEY');
+    final serperApiKey = optional('SERPER_API_KEY');
+    final serpapiKey = optional('SERPAPI_KEY');
+
+    // At least one search provider must be configured, otherwise there is
+    // nothing to power the `searchPromo` tool / buzz checks.
+    if (tavilyApiKey == null && serperApiKey == null && serpapiKey == null) {
+      throw Exception(
+          'No search provider configured. Set at least one of TAVILY_API_KEY, '
+          'SERPER_API_KEY, or SERPAPI_KEY in your .env file or crontab.');
+    }
+
     return Config._(
       geminiApiKey: require('GEMINI_API_KEY'),
-      groqApiKey: env['GROQ_API_KEY'],
-      serpapiKey: require('SERPAPI_KEY'),
+      openRouterApiKey: optional('OPENROUTER_API_KEY'),
+      fallbackModel: optional('FALLBACK_MODEL'),
+      tavilyApiKey: tavilyApiKey,
+      serperApiKey: serperApiKey,
+      serpapiKey: serpapiKey,
       telegramBotToken: require('TG_BOT_TOKEN'),
       telegramChatId: require('TG_CHAT_ID'),
       outputDir: orDefault('OUTPUT_DIR', './harness-data'),

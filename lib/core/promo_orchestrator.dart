@@ -33,14 +33,26 @@ class PromoOrchestrator {
   /// deduplication and the max-10-per-sub-category cap are also handled
   /// by Gemini inside PromoFlow.
   ///
+  /// [onCategoryComplete] (optional) is awaited after each sub-category is
+  /// enriched, so the caller can notify per-category (e.g. send a separate
+  /// Telegram message per category as soon as it's ready).
+  ///
   /// Failures are ISOLATED per sub-category: if one sub-category's
   /// extraction throws (e.g. Gemini rate limit, max-turns abort), it is
   /// logged and skipped so the remaining sub-categories are still
   /// delivered. Only if EVERY sub-category fails does this rethrow, so
   /// the caller sends an error notification instead of a misleading
   /// "no promos found" summary.
-  Future<List<Promo>> runDefault({required String region}) async {
-    return _runForCategories(categorySearchHints, region);
+  Future<List<Promo>> runDefault({
+    required String region,
+    Future<void> Function(String category, List<Promo> promos)?
+        onCategoryComplete,
+  }) async {
+    return _runForCategories(
+      categorySearchHints,
+      region,
+      onCategoryComplete: onCategoryComplete,
+    );
   }
 
   /// Used by the bot listener: finds promos for a specific [location] per
@@ -51,6 +63,8 @@ class PromoOrchestrator {
   Future<List<Promo>> runForLocation(
     String location, {
     List<String>? categoryList,
+    Future<void> Function(String category, List<Promo> promos)?
+        onCategoryComplete,
   }) async {
     final targetCategories = (categoryList == null || categoryList.isEmpty)
         ? categorySearchHints.keys.toList()
@@ -62,7 +76,11 @@ class PromoOrchestrator {
           category: categorySearchHints[category]!,
     };
 
-    return _runForCategories(hints, location);
+    return _runForCategories(
+      hints,
+      location,
+      onCategoryComplete: onCategoryComplete,
+    );
   }
 
   /// Shared loop behind [runDefault] and [runForLocation]: extracts and
@@ -71,8 +89,10 @@ class PromoOrchestrator {
   /// requested sub-categories failed.
   Future<List<Promo>> _runForCategories(
     Map<String, String> hintsByCategory,
-    String region,
-  ) async {
+    String region, {
+    Future<void> Function(String category, List<Promo> promos)?
+        onCategoryComplete,
+  }) async {
     final allPromos = <Promo>[];
     final failures = <String>[];
 
@@ -80,17 +100,31 @@ class PromoOrchestrator {
       final category = entry.key;
       final searchHint = entry.value;
 
+      List<Promo> enriched;
       try {
         final promos = await promoFlow.extract(
           category,
           region,
           searchHint: searchHint,
         );
-        allPromos.addAll(await _enrich(promos));
+        enriched = await _enrich(promos);
+        allPromos.addAll(enriched);
       } catch (e) {
         stderr.writeln(
             '[orchestrator] Extraction failed for category "$category", skipping: $e');
         failures.add(category);
+        continue;
+      }
+
+      if (onCategoryComplete != null) {
+        try {
+          await onCategoryComplete(category, enriched);
+        } catch (e) {
+          // A notification failure (e.g. Telegram hiccup) must not affect
+          // the extraction accounting for the remaining categories.
+          stderr.writeln(
+              '[orchestrator] Category notification failed for "$category": $e');
+        }
       }
     }
 

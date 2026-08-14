@@ -48,7 +48,10 @@ harness/
 │   ├── models/
 │   │   └── promo.dart             # Promo data model
 │   ├── services/
-│   │   ├── serpapi_client.dart    # SerpApi HTTP wrapper (used via the Genkit tool)
+│   │   ├── search_fallback_client.dart # Tavily > Serper > SerpApi fallback chain
+│   │   ├── serpapi_client.dart    # SerpApi HTTP wrapper + SearchService interface
+│   │   ├── serper_client.dart     # Serper.dev HTTP wrapper
+│   │   ├── tavily_client.dart     # Tavily HTTP wrapper
 │   │   ├── social_buzz_checker.dart # "how much is this being talked about" signal
 │   │   ├── link_validator.dart    # drops promos with unreachable source links
 │   │   └── telegram_notify.dart   # formats & sends results to Telegram
@@ -79,7 +82,7 @@ defined. The project will not compile without this generated file.
 Fill in `.env` with:
 
 - `GEMINI_API_KEY` — free from [Google AI Studio](https://aistudio.google.com/apikey), no credit card needed
-- `SERPAPI_KEY` — from your [serpapi.com](https://serpapi.com/manage-api-key) dashboard
+- A search provider key — at least one of `TAVILY_API_KEY` ([tavily.com](https://tavily.com)), `SERPER_API_KEY` ([serper.dev](https://serper.dev)), or `SERPAPI_KEY` ([serpapi.com](https://serpapi.com/manage-api-key)). Providers are tried in that priority order; if one errors or hits its rate/plan limit, the next configured provider is used automatically.
 - `TG_BOT_TOKEN` — your Telegram bot token (via `@BotFather`)
 - `TG_CHAT_ID` — target chat ID. To find it: send any message to the bot, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and look for `"chat":{"id": ...}`
 - `REGION`, `ENABLE_BUZZ_CHECK`, `ENABLE_LINK_VALIDATION` — all optional, sensible defaults already set (see sections 6-9)
@@ -135,7 +138,7 @@ working directory).
 tail -f /home/pi/harness/log.txt
 ```
 
-If something fails (SerpApi error, Gemini error, etc.), the program also
+If something fails (a search provider error, Gemini error, etc.), the program also
 sends a short error notification to Telegram automatically, so you don't
 need to check the log manually every week — just watch for an error
 notification.
@@ -244,11 +247,16 @@ nohup ./bot_listener >> bot_listener.log 2>&1 &
 - The bot only responds to messages from the configured `TG_CHAT_ID` —
   messages from other chats are silently ignored.
 
-## 8. Architecture: SerpApi as a Genkit tool + two-phase generation
+## 8. Architecture: search provider as a Genkit tool + two-phase generation
 
-Previously, our code called SerpApi first with a fixed query, then stuffed
-the raw results into a Gemini prompt for summarizing. Now it's inverted:
-SerpApi is registered as a **tool** that Gemini calls itself.
+Previously, our code called the search provider first with a fixed query,
+then stuffed the raw results into a Gemini prompt for summarizing. Now
+it's inverted: the search provider is registered as a **tool** that Gemini
+calls itself. The search provider is an abstraction (`SearchService`) with
+a fixed fallback chain **Tavily > Serper > SerpApi**
+(`lib/services/search_fallback_client.dart`): whichever providers have an
+API key configured are tried in that order, and a failure/rate-limit on
+one automatically falls through to the next.
 
 **Why split into TWO `generate()` calls, not one:**
 Combining tool calling (`toolNames`) with structured output
@@ -267,7 +275,7 @@ _ai.defineTool(
   description: 'Searches Google for the latest promos/discounts...',
   inputSchema: SearchPromoInput.$schema,
   fn: (input, _) async {
-    final results = await _serpapi.search(input.query, maxResults: 10);
+    final results = await _search.search(input.query, maxResults: 10);
     // ...formatted as text, returned to Gemini
   },
 );
@@ -285,8 +293,9 @@ content.
 **Practical consequences of this two-phase design:**
 
 - **2x Gemini calls per sub-category** (not 1x) — for 4 sub-categories/week, that's 8 Gemini calls per week at baseline (still well within `gemini-2.5-flash`'s free tier limits).
-- Phase 1 may call the `searchPromo` tool more than once, but it is CAPPED: `maxTurns: 3` (= the initial request + at most 2 search rounds), and the prompt tells Gemini the same budget ("AT MOST TWICE"). Worst case is therefore 4 Gemini calls + 2 SerpApi calls per sub-category — not an unbounded agent loop.
+- Phase 1 may call the `searchPromo` tool more than once, but it is CAPPED: `maxTurns: 3` (= the initial request + at most 2 search rounds), and the prompt tells Gemini the same budget ("AT MOST TWICE"). Worst case is therefore 4 Gemini calls + 2 search-provider calls per sub-category — not an unbounded agent loop.
 - Both `generate()` calls use Genkit's `retry` middleware (`RetryPlugin` registered in `PromoFlow`), so a transient Gemini 429/RESOURCE_EXHAUSTED is retried with exponential backoff instead of aborting the whole run.
+- If Gemini still fails after retries and `OPENROUTER_API_KEY` is set, the flow switches to a single-phase fallback: one fixed search query + an OpenRouter model (default `openai/gpt-oss-20b:free`, overridable via `FALLBACK_MODEL`) that extracts promos as prompt-based JSON. This fallback is simpler and less consistent than the Gemini two-phase path, so it's only a safety net for rate limits.
 - Sub-category failures are isolated in `PromoOrchestrator`: one failing sub-category (rate limit, max-turns abort, etc.) is logged & skipped so the rest are still delivered; the run only errors out if EVERY sub-category failed.
 - If you need a hard, predictable call count later, the simplest option is reverting to the old pattern (manual pre-fetch, no tool calling) — but that sacrifices the adaptive behavior that motivated this change in the first place.
 
@@ -327,7 +336,8 @@ ENABLE_LINK_VALIDATION=false
 
 ## 10. Social buzz signal
 
-Every promo that passes extraction is checked again via SerpApi to see how
+Every promo that passes extraction is checked again via the search
+provider to see how
 much its brand is being talked about on **Instagram, TikTok, Facebook,
 YouTube, X, and Threads** — shown on Telegram as:
 
@@ -337,13 +347,13 @@ YouTube, X, and Threads** — shown on Telegram as:
 
 **How it works & its limitations (important to understand):**
 
-- The query used is `"<merchant name>" promo (site:instagram.com OR site:tiktok.com OR ...)` — ONE combined query covering all six platforms at once, not 6 separate queries. This is a deliberate cost decision: 6 separate queries per promo x ~40 promos/week = 240 extra SerpApi calls/week, versus ~40 extra calls/week with the combined approach (fewer in practice, since buzz is checked once per UNIQUE merchant — several promos from the same merchant share a single check).
+- The query used is `"<merchant name>" promo (site:instagram.com OR site:tiktok.com OR ...)` — ONE combined query covering all six platforms at once, not 6 separate queries. This is a deliberate cost decision: 6 separate queries per promo x ~40 promos/week = 240 extra search-provider calls/week, versus ~40 extra calls/week with the combined approach (fewer in practice, since buzz is checked once per UNIQUE merchant — several promos from the same merchant share a single check).
 - Consequence: this signal shows **which platforms mention the brand**, not an exact count per platform.
 - The query searches for the merchant name + the word "promo" generally, not the exact extracted `promoTitle` text — because Gemini's summarized wording rarely matches real social captions word-for-word. So this is a signal for how much the **brand** is being discussed in relation to promos, not confirmation that this exact promo is what's trending.
 - Score labels: 0 results = "Belum ramai dibicarakan", 1-3 = "Mulai dibicarakan", 4-7 = "Cukup ramai", 8+ = "Sangat ramai 🔥".
 - Buzz checks run in parallel per batch, so they don't add a large linear delay.
 
-**If SerpApi quota becomes a problem**, disable via `.env`:
+**If search-provider quota becomes a problem**, disable via `.env`:
 
 ```
 ENABLE_BUZZ_CHECK=false
@@ -353,8 +363,8 @@ Promos are still sent as usual, just without the buzz signal line.
 
 **If you need an exact per-platform breakdown** later (not just "which
 platforms"), that requires upgrading to separate per-platform queries —
-automatically 6x the SerpApi cost per promo, so weigh that against your
-SerpApi quota/budget first.
+automatically 6x the search-provider cost per promo, so weigh that against
+your quota/budget first.
 
 ## Further development ideas (optional)
 

@@ -46,6 +46,14 @@ class TelegramNotify {
   /// be safely escaped by the caller if it contains dynamic data.
   Future<void> sendPlainMessage(String text) => _sendRaw(text);
 
+  /// Sends a single sub-category's promos as its own message (one or more
+  /// messages if the category overflows the length limit).
+  Future<void> sendCategorySummary(String category, List<Promo> promos) async {
+    for (final msg in _formatter.formatCategory(category, promos)) {
+      await _sendRaw(msg);
+    }
+  }
+
   Future<void> sendError(String errorMessage) async {
     await _sendRaw(
         '⚠️ <b>Harness gagal jalan</b>\n${escapeHtml(errorMessage)}');

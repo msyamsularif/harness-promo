@@ -12,7 +12,8 @@ import 'promo_schema.dart';
 
 /// Flow that searches for and summarizes promos through Gemini (via Genkit).
 ///
-/// IMPORTANT: SerpApi is registered here as a Genkit TOOL (`searchPromo`),
+/// IMPORTANT: The search service (SerpApi/Tavily/Serper via the fallback
+/// chain) is registered here as a Genkit TOOL (`searchPromo`),
 /// not called manually beforehand with results stuffed into the prompt.
 /// Gemini itself decides which search keywords to use, and may call the
 /// tool more than once with different keywords if the first attempt isn't
@@ -36,20 +37,24 @@ import 'promo_schema.dart';
 /// instead of aborting the whole run.
 class PromoFlow {
   final Genkit _ai;
-  final SerpApiClient _serpapi;
+  final SearchService _search;
 
   /// Gemini model used. `gemini-2.5-flash` is on Google AI Studio's free
   /// tier, fast enough, and supports tool calling.
   static const _modelName = 'gemini-2.5-flash';
 
-  /// Groq fallback model when Gemini hits rate limits. Uses Groq's free
-  /// tier (~30 RPM). Llama 3.3 70B supports tools, multiturn, and system
-  /// role — same feature set our flow needs.
-  static const _fallbackModel = 'openai/gpt-oss-120b';
+  /// Fallback model when Gemini hits rate limits. Uses OpenRouter's
+  /// OpenAI-compatible API with a free model. The model only needs to
+  /// follow the JSON prompt (single-phase fallback doesn't use tools).
+  static const _defaultFallbackModel = 'openai/gpt-oss-20b:free';
 
-  /// True when a Groq fallback plugin has been registered (groqApiKey was
+  /// True when a fallback plugin has been registered (openRouterApiKey was
   /// provided). When false, rate-limit errors are rethrown as before.
   final bool _hasFallback;
+
+  /// The OpenRouter model identifier used by the fallback path (resolved
+  /// from the FALLBACK_MODEL env var, or the default free model).
+  final String _fallbackModel;
 
   /// Max MERCHANTS kept per sub-category (several promos from the same
   /// merchant count as ONE slot and are later rendered as one Telegram
@@ -59,20 +64,21 @@ class PromoFlow {
 
   PromoFlow(
       {required String geminiApiKey,
-      String? groqApiKey,
-      required SerpApiClient serpapi})
+      String? openRouterApiKey,
+      String? fallbackModel,
+      required SearchService search})
       : _ai = Genkit(plugins: [
           googleAI(apiKey: geminiApiKey),
-          if (groqApiKey != null && groqApiKey.isNotEmpty)
+          if (openRouterApiKey != null && openRouterApiKey.isNotEmpty)
             openAI(
-              name: 'groq',
-              apiKey: groqApiKey,
-              baseUrl: 'https://api.groq.com/openai/v1',
+              name: 'openrouter',
+              apiKey: openRouterApiKey,
+              baseUrl: 'https://openrouter.ai/api/v1',
               models: [
                 CustomModelDefinition(
-                  name: _fallbackModel,
+                  name: fallbackModel ?? _defaultFallbackModel,
                   info: ModelInfo(
-                    label: 'GPT-OSS 120B',
+                    label: 'OpenRouter fallback',
                     supports: {
                       'multiturn': true,
                       'tools': true,
@@ -84,8 +90,9 @@ class PromoFlow {
             ),
           RetryPlugin(),
         ]),
-        _hasFallback = groqApiKey != null && groqApiKey.isNotEmpty,
-        _serpapi = serpapi {
+        _hasFallback = openRouterApiKey != null && openRouterApiKey.isNotEmpty,
+        _fallbackModel = fallbackModel ?? _defaultFallbackModel,
+        _search = search {
     _registerSearchTool();
   }
 
@@ -100,7 +107,7 @@ class PromoFlow {
           'category, or a variation of promo-related terms).',
       inputSchema: SearchPromoInput.$schema,
       fn: (input, _) async {
-        final results = await _serpapi.search(input.query);
+        final results = await _search.search(input.query);
         if (results.isEmpty) {
           return 'No search results found for this query.';
         }
@@ -112,23 +119,25 @@ class PromoFlow {
     );
   }
 
-  ModelRef<dynamic> _groqModel() =>
-      openAI.model(_fallbackModel, namespace: 'groq');
+  ModelRef<dynamic> _fallbackModelRef() =>
+      openAI.model(_fallbackModel, namespace: 'openrouter');
 
-  /// Groq fallback: calls SerpApi directly (no Genkit tool calling),
-  /// then asks GPT-OSS to extract structured promos from raw search text.
-  /// Avoids the "json mode + tools" conflict and `strict: true` schema
-  /// validation failures by using prompt-based JSON output + manual parse.
-  Future<List<Promo>> _groqSinglePhase(
+  /// OpenRouter fallback: calls the search service directly (no Genkit tool
+  /// calling), then asks the fallback model to extract structured promos
+  /// from raw search text. Uses prompt-based JSON output + manual parse
+  /// (OpenRouter free models don't reliably support strict JSON schema).
+  Future<List<Promo>> _fallbackSinglePhase(
     String category,
     String region,
     DateTime today,
     String todayIso,
     String searchHint,
   ) async {
-    final searchResults = await _serpapi.search(
+    final searchResults = await _search.search(
       '$searchHint $region minggu ini',
     );
+    stderr.writeln('[promo_flow][fallback] "$category": search returned '
+        '${searchResults.length} results.');
     if (searchResults.isEmpty) return [];
 
     final searchText = searchResults
@@ -163,28 +172,42 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
 Rules:
 - Max $_maxPromoPerCategory different merchants. Multiple promos from same merchant = count as one.
 - Deduplicate: same merchant & offer from different sources → merge into one entry.
+- LINK ACCURACY: each promo's "sourceLink" must be the URL of a page/post that specifically discusses that exact promo. Never reuse the same sourceLink for two DIFFERENT merchants. If you cannot find a distinct, correct source link for a promo, skip that promo entirely.
 - Write in Bahasa Indonesia. Do not invent info.
 - If there are no valid promos, return {"promos": []}.
 - Only output the JSON object, nothing else.
 ''';
 
     final response = await _ai.generate<dynamic, String>(
-      model: _groqModel(),
+      model: _fallbackModelRef(),
       prompt: prompt,
       use: [retry()],
     );
 
-    return _parseGroqResponse(response.text, category, today);
+    final promos = _parseFallbackResponse(response.text, category, today);
+    stderr.writeln('[promo_flow][fallback] "$category": extracted '
+        '${promos.length} promos.');
+    return promos;
   }
 
-  List<Promo> _parseGroqResponse(String text, String category, DateTime today) {
+  List<Promo> _parseFallbackResponse(
+      String text, String category, DateTime today) {
     try {
       final json = _extractJson(text);
-      if (json == null) return [];
+      if (json == null) {
+        stderr.writeln('[promo_flow][fallback] "$category": could not parse '
+            'JSON from fallback response (length ${text.length}).');
+        return [];
+      }
       final list = json['promos'] as List<dynamic>?;
-      if (list == null || list.isEmpty) return [];
+      if (list == null || list.isEmpty) {
+        stderr.writeln('[promo_flow][fallback] "$category": fallback model '
+            'returned an empty promos list.');
+        return [];
+      }
 
       final byMerchant = <String, List<PromoItemSchema>>{};
+      final linkOwner = <String, String>{};
       for (final itemJson in list) {
         if (itemJson is! Map<String, dynamic>) continue;
         try {
@@ -194,8 +217,21 @@ Rules:
             final expiry = DateTime(parsed.year, parsed.month, parsed.day);
             if (expiry.isBefore(today)) continue;
           }
+
+          final merchantKey = _itemKey(item.merchant);
+          final link = _normalizeLink(item.sourceLink);
+
+          // Guard against the fallback model hallucinating the same source
+          // link across different merchants: only the first merchant keeps
+          // a given link; later reuses are dropped.
+          if (link.isNotEmpty) {
+            final owner = linkOwner[link];
+            if (owner != null && owner != merchantKey) continue;
+            linkOwner[link] = merchantKey;
+          }
+
           byMerchant
-              .putIfAbsent(_itemKey(item.merchant), () => [])
+              .putIfAbsent(merchantKey, () => [])
               .add(item);
         } catch (_) {
           // Skip malformed items
@@ -208,7 +244,7 @@ Rules:
           .map(_toPromo)
           .toList();
     } catch (e) {
-      stderr.writeln('[promo_flow] Failed to parse Groq response: $e');
+      stderr.writeln('[promo_flow] Failed to parse fallback response: $e');
       return [];
     }
   }
@@ -217,19 +253,94 @@ Rules:
   String _itemKey(String merchant) =>
       merchant.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
 
+  /// Normalizes a source URL for de-duplication: trims and drops a trailing
+  /// slash so `https://a.b/` and `https://a.b` compare equal.
+  String _normalizeLink(String link) {
+    var l = link.trim();
+    if (l.endsWith('/')) l = l.substring(0, l.length - 1);
+    return l;
+  }
+
   Map<String, dynamic>? _extractJson(String text) {
+    // Strip markdown code fences (```json ... ```) first — GPT-OSS sometimes
+    // wraps its output even when asked for raw JSON.
+    var candidate = text.trim().replaceFirst(RegExp(r'^\s*```[a-zA-Z]*\s*'), '');
+    candidate = candidate.replaceFirst(RegExp(r'```\s*$'), '').trim();
+
+    final direct = _tryDecodeObject(candidate);
+    if (direct != null) return direct;
+
+    // Fall back to locating the outermost balanced JSON object (or array)
+    // within whatever prose the model may have emitted.
+    final object = _extractBalanced(candidate, '{', '}');
+    if (object != null) {
+      final parsed = _tryDecodeObject(object);
+      if (parsed != null) return parsed;
+    }
+
+    final array = _extractBalanced(candidate, '[', ']');
+    if (array != null) {
+      final list = _tryDecodeList(array);
+      if (list != null) return {'promos': list};
+    }
+
+    final preview =
+        text.length > 200 ? text.substring(0, 200) : text;
+    stderr.writeln('[promo_flow] Could not parse fallback response as JSON '
+        '(length ${text.length}). First 200 chars: $preview');
+    return null;
+  }
+
+  Map<String, dynamic>? _tryDecodeObject(String s) {
     try {
-      return jsonDecode(text) as Map<String, dynamic>;
+      final decoded = jsonDecode(s);
+      return decoded is Map<String, dynamic> ? decoded : null;
     } catch (_) {
-      // Try to find a JSON object in the text
-      final match = RegExp(r'\{[\s\S]*\}').firstMatch(text);
-      if (match != null) {
-        try {
-          return jsonDecode(match.group(0)!) as Map<String, dynamic>;
-        } catch (_) {}
-      }
       return null;
     }
+  }
+
+  List<dynamic>? _tryDecodeList(String s) {
+    try {
+      final decoded = jsonDecode(s);
+      return decoded is List ? decoded : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Returns the substring from the first [open] char to its matching
+  /// [close] char, honoring quotes so braces inside string values don't
+  /// break the scan. Returns null if no balanced pair exists.
+  String? _extractBalanced(String text, String open, String close) {
+    final start = text.indexOf(open);
+    if (start < 0) return null;
+
+    var depth = 0;
+    var inString = false;
+    var escaped = false;
+    for (var i = start; i < text.length; i++) {
+      final ch = text[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch == '\\') {
+          escaped = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch == '"') {
+        inString = true;
+      } else if (ch == open) {
+        depth++;
+      } else if (ch == close) {
+        depth--;
+        if (depth == 0) return text.substring(start, i + 1);
+      }
+    }
+    return null;
   }
 
   /// [category] sub-category label, e.g. "Makanan", "Minuman", "Jajanan",
@@ -252,8 +363,8 @@ Rules:
       if (!_hasFallback) rethrow;
 
       stderr.writeln('[promo_flow] Gemini failed for "$category" '
-          '(${e.runtimeType}), switching to Groq single-phase fallback');
-      return await _groqSinglePhase(
+          '(${e.runtimeType}), switching to OpenRouter single-phase fallback');
+      return await _fallbackSinglePhase(
           category, region, today, todayIso, searchHint);
     }
   }
@@ -296,6 +407,8 @@ Once you feel the search results are sufficient, write a summary of the promos a
     );
 
     final rawSummary = researchResponse.text.trim();
+    stderr.writeln('[promo_flow][gemini] "$category": phase 1 summary is '
+        '${rawSummary.length} chars.');
     if (rawSummary.isEmpty) return [];
 
     final structurePrompt = '''
@@ -319,6 +432,9 @@ Turn the summary above into structured data following the given schema. Do NOT a
           'Gemini did not return valid structured output for category "$category".');
     }
 
+    stderr.writeln('[promo_flow][gemini] "$category": phase 2 produced '
+        '${result.promos.length} raw promos.');
+
     // Safety net for the prompt's expiry rule: drop promos whose
     // normalized expiry date is BEFORE today. Expiring exactly today is
     // still valid; an empty/unparseable date keeps the promo (we can't
@@ -341,11 +457,14 @@ Turn the summary above into structured data following the given schema. Do NOT a
           .add(item);
     }
 
-    return byMerchant.values
+    final promos = byMerchant.values
         .take(_maxPromoPerCategory)
         .expand((group) => group)
         .map(_toPromo)
         .toList();
+    stderr.writeln('[promo_flow][gemini] "$category": kept ${promos.length} '
+        'promos after validity + merchant cap.');
+    return promos;
   }
 
   Promo _toPromo(PromoItemSchema item) => Promo(

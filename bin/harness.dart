@@ -3,7 +3,8 @@ import 'dart:io';
 import 'package:harness/config.dart';
 import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
-import 'package:harness/services/serpapi_client.dart';
+import 'package:harness/services/search_fallback_client.dart';
+import 'package:harness/services/telegram_formatter.dart';
 import 'package:harness/services/telegram_notify.dart';
 import 'package:harness/storage/promo_storage.dart';
 
@@ -19,13 +20,18 @@ Future<void> main() async {
     exit(1);
   }
 
-  final serpapi = SerpApiClient(apiKey: config.serpapiKey);
+  final search = buildSearchClient(
+    tavilyApiKey: config.tavilyApiKey,
+    serperApiKey: config.serperApiKey,
+    serpapiApiKey: config.serpapiKey,
+  );
   final promoFlow = PromoFlow(
       geminiApiKey: config.geminiApiKey,
-      groqApiKey: config.groqApiKey,
-      serpapi: serpapi);
+      openRouterApiKey: config.openRouterApiKey,
+      fallbackModel: config.fallbackModel,
+      search: search);
   final orchestrator = PromoOrchestrator(
-    search: serpapi,
+    search: search,
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
@@ -39,18 +45,30 @@ Future<void> main() async {
   try {
     stdout.writeln('[harness] Searching promos for region: ${config.region}');
 
-    final allPromos = await orchestrator.runDefault(region: config.region);
+    // Let the user know the run is in progress (it can take a few minutes).
+    await telegram.sendPlainMessage(
+        '🔎 <b>Harness Promo</b>\n'
+        'Sedang mencari promo mingguan untuk <i>${escapeHtml(config.region)}</i>... '
+        'mohon tunggu sebentar.');
+
+    final allPromos = await orchestrator.runDefault(
+      region: config.region,
+      onCategoryComplete: (category, promos) async {
+        if (promos.isEmpty) {
+          await telegram.sendPlainMessage(
+              '${escapeHtml(category)}: tidak ditemukan promo.');
+          return;
+        }
+        await telegram.sendCategorySummary(category, promos);
+      },
+    );
 
     stdout.writeln('[harness] Extracted ${allPromos.length} promos in total.');
 
     final savedFile = await storage.saveWeekly(allPromos);
     stdout.writeln('[harness] History saved to: ${savedFile.path}');
 
-    await telegram.sendPromoSummary(
-      allPromos,
-      subtitle: config.region,
-    );
-    stdout.writeln('[harness] Telegram notification sent. Done.');
+    stdout.writeln('[harness] Done.');
   } catch (e, stackTrace) {
     stderr.writeln('[harness] ERROR: $e\n$stackTrace');
     try {
@@ -61,7 +79,7 @@ Future<void> main() async {
     }
     exit(1);
   } finally {
-    serpapi.close();
+    search.close();
     telegram.close();
   }
 }

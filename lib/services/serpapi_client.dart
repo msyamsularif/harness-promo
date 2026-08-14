@@ -5,6 +5,8 @@ import 'package:http/http.dart' as http;
 /// for a different backend without changing consumers.
 abstract class SearchService {
   Future<List<SearchResult>> search(String query, {int maxResults = 10});
+
+  void close();
 }
 
 /// A single raw search result from SerpApi, before it's summarized by AI.
@@ -15,8 +17,37 @@ class SearchResult {
 
   SearchResult({required this.title, required this.snippet, required this.link});
 
+  /// Returns a cleaned copy: whitespace collapsed, common HTML entities
+  /// decoded, and the snippet capped at [maxSnippetLength]. This keeps the
+  /// data fed into Gemini/OpenRouter tidy regardless of which provider produced
+  /// it (Tavily `content` tends to be much longer than SerpApi `snippet`).
+  SearchResult normalized({int maxSnippetLength = 500}) => SearchResult(
+        title: _cleanText(title),
+        snippet: _cleanText(snippet, maxLength: maxSnippetLength),
+        link: link.trim(),
+      );
+
   @override
   String toString() => 'Title: $title\nSnippet: $snippet\nLink: $link';
+}
+
+/// Collapses runs of whitespace (including newlines) into single spaces,
+/// decodes common HTML entities, trims, and optionally caps the length.
+/// `&amp;` is decoded LAST so an entity like `&amp;lt;` isn't double-decoded.
+String _cleanText(String raw, {int? maxLength}) {
+  var text = raw.replaceAll(RegExp(r'\s+'), ' ').trim();
+  text = text
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'")
+      .replaceAll('&nbsp;', ' ')
+      .replaceAll('&amp;', '&');
+  if (maxLength != null && text.length > maxLength) {
+    text = text.substring(0, maxLength).trimRight();
+  }
+  return text;
 }
 
 class SerpApiClient implements SearchService {
