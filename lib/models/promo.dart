@@ -19,8 +19,26 @@ class Promo {
   final String merchant;
   final String promoTitle;
   final String discount;
+
+  /// Normalized discount type ("percentage", "fixed", "bogo", "other" or
+  /// empty when unclear). Filled by Gemini at extraction, used for scoring.
+  final String discountType;
+
+  /// Numeric discount value (percentage number for "percentage", Rupiah
+  /// amount for "fixed", null otherwise). Filled by Gemini, used for scoring.
+  final double? discountAmount;
+
   final String terms;
   final String expiryDate; // free-form string, e.g. "31 August 2026" / "Not specified"
+
+  /// Normalized ISO 8601 expiry date (YYYY-MM-DD), or empty when unknown.
+  /// Used for expiry pruning, freshness scoring, and cross-week dedup.
+  final String expiryDateIso;
+
+  /// Short verbatim quote supporting the discount/expiry. Empty means the
+  /// promo is treated as low-confidence during scoring.
+  final String evidenceQuote;
+
   final String sourceLink;
 
   /// Number of social media search results found (Instagram, TikTok,
@@ -39,8 +57,12 @@ class Promo {
     required this.merchant,
     required this.promoTitle,
     required this.discount,
+    this.discountType = '',
+    this.discountAmount,
     required this.terms,
     required this.expiryDate,
+    this.expiryDateIso = '',
+    this.evidenceQuote = '',
     required this.sourceLink,
     this.buzzScore = -1,
     this.buzzLabel = 'Belum dicek',
@@ -58,8 +80,31 @@ class Promo {
         merchant: merchant,
         promoTitle: promoTitle,
         discount: discount,
+        discountType: discountType,
+        discountAmount: discountAmount,
         terms: terms,
         expiryDate: expiryDate,
+        expiryDateIso: expiryDateIso,
+        evidenceQuote: evidenceQuote,
+        sourceLink: sourceLink,
+        buzzScore: buzzScore,
+        buzzLabel: buzzLabel,
+        buzzPlatforms: buzzPlatforms,
+      );
+
+  /// Returns a copy with the given field overridden (used by fuzzy dedup to
+  /// normalize a merchant alias to its representative name).
+  Promo copyWith({String? merchant}) => Promo(
+        category: category,
+        merchant: merchant ?? this.merchant,
+        promoTitle: promoTitle,
+        discount: discount,
+        discountType: discountType,
+        discountAmount: discountAmount,
+        terms: terms,
+        expiryDate: expiryDate,
+        expiryDateIso: expiryDateIso,
+        evidenceQuote: evidenceQuote,
         sourceLink: sourceLink,
         buzzScore: buzzScore,
         buzzLabel: buzzLabel,
@@ -72,8 +117,12 @@ class Promo {
       merchant: json['merchant']?.toString() ?? '-',
       promoTitle: json['promo_title']?.toString() ?? '-',
       discount: json['discount']?.toString() ?? '-',
+      discountType: json['discount_type']?.toString() ?? '',
+      discountAmount: (json['discount_amount'] as num?)?.toDouble(),
       terms: json['terms']?.toString() ?? '',
       expiryDate: json['expiry_date']?.toString() ?? 'Tidak disebutkan',
+      expiryDateIso: json['expiry_date_iso']?.toString() ?? '',
+      evidenceQuote: json['evidence_quote']?.toString() ?? '',
       sourceLink: json['source_link']?.toString() ?? '',
       buzzScore: json['buzz_score'] is int ? json['buzz_score'] as int : -1,
       buzzLabel: json['buzz_label']?.toString() ?? 'Belum dicek',
@@ -89,8 +138,12 @@ class Promo {
         'merchant': merchant,
         'promo_title': promoTitle,
         'discount': discount,
+        'discount_type': discountType,
+        'discount_amount': discountAmount,
         'terms': terms,
         'expiry_date': expiryDate,
+        'expiry_date_iso': expiryDateIso,
+        'evidence_quote': evidenceQuote,
         'source_link': sourceLink,
         'buzz_score': buzzScore,
         'buzz_label': buzzLabel,

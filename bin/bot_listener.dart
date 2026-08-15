@@ -6,6 +6,7 @@ import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
 import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_notify.dart';
+import 'package:harness/storage/seen_promos_store.dart';
 import 'package:http/http.dart' as http;
 
 /// Parses and executes incoming bot commands, separating command logic
@@ -156,6 +157,7 @@ Future<void> main() async {
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
+    dedupStore: SeenPromosStore(outputDir: config.outputDir),
   );
   final telegram = TelegramNotify(
     botToken: config.telegramBotToken,

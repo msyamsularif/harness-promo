@@ -5,23 +5,30 @@ import '../models/promo.dart';
 import '../services/link_validator.dart';
 import '../services/serpapi_client.dart';
 import '../services/social_buzz_checker.dart';
+import '../storage/seen_promos_store.dart';
 import 'promo_constants.dart';
+import 'promo_scoring.dart';
 
 class PromoOrchestrator {
   final PromoFlow promoFlow;
   final bool enableBuzzCheck;
   final bool enableLinkValidation;
+  final SeenPromosStore? dedupStore;
   late final SocialBuzzChecker _buzzChecker;
   late final LinkValidator _linkValidator;
 
   /// [search] is ONLY used by SocialBuzzChecker (the "how much is this
   /// being talked about" signal) — NOT for the main promo search, which
   /// is already delegated to the `searchPromo` tool inside [promoFlow].
+  ///
+  /// [dedupStore], when provided, enables cross-week dedup: promos already
+  /// seen in a previous run are filtered out before delivery.
   PromoOrchestrator({
     required SearchService search,
     required this.promoFlow,
     this.enableBuzzCheck = true,
     this.enableLinkValidation = true,
+    this.dedupStore,
   }) {
     _buzzChecker = SocialBuzzChecker(search: search);
     _linkValidator = LinkValidator();
@@ -108,6 +115,15 @@ class PromoOrchestrator {
           searchHint: searchHint,
         );
         enriched = await _enrich(promos);
+
+        // Cross-week dedup (spec C): drop promos already delivered in a
+        // previous run, then order deterministically by composite score
+        // (spec A) instead of relying purely on prompt ordering.
+        if (dedupStore != null) {
+          enriched = dedupStore!.filterNew(enriched);
+        }
+        enriched = rankByScore(enriched);
+
         allPromos.addAll(enriched);
       } catch (e) {
         stderr.writeln(
@@ -131,6 +147,17 @@ class PromoOrchestrator {
     if (failures.isNotEmpty && failures.length == hintsByCategory.length) {
       throw Exception(
           'All ${failures.length} sub-category extractions failed; nothing to deliver.');
+    }
+
+    // Persist the (pruned) cross-week dedup state once per run.
+    if (dedupStore != null) {
+      try {
+        await dedupStore!.save();
+      } catch (e) {
+        // A failed save must not break delivery — the in-memory state is
+        // still correct for this run.
+        stderr.writeln('[orchestrator] Failed to save dedup store: $e');
+      }
     }
 
     return allPromos;

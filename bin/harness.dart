@@ -7,6 +7,7 @@ import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_formatter.dart';
 import 'package:harness/services/telegram_notify.dart';
 import 'package:harness/storage/promo_storage.dart';
+import 'package:harness/storage/seen_promos_store.dart';
 
 /// Entry point for the weekly cron job. Searches for Makanan, Minuman,
 /// Jajanan, and Lifestyle promos for a single main region (default:
@@ -35,6 +36,7 @@ Future<void> main() async {
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
+    dedupStore: SeenPromosStore(outputDir: config.outputDir),
   );
   final storage = PromoStorage(outputPath: config.outputDir);
   final telegram = TelegramNotify(
