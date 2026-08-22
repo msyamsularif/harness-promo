@@ -6,3 +6,4 @@ build/
 harness_promo
 bot_listener
 .bot_offset
+.bot_listener.lock
