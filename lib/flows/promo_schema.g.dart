@@ -21,9 +21,12 @@ base class PromoItemSchema {
     required String merchant,
     required String promoTitle,
     required String discount,
+    required String discountType,
+    required double discountAmount,
     required String terms,
     required String expiryDate,
     required String expiryDateIso,
+    required String evidenceQuote,
     required String sourceLink,
   }) {
     _json = {
@@ -31,9 +34,12 @@ base class PromoItemSchema {
       'merchant': merchant,
       'promoTitle': promoTitle,
       'discount': discount,
+      'discountType': discountType,
+      'discountAmount': discountAmount,
       'terms': terms,
       'expiryDate': expiryDate,
       'expiryDateIso': expiryDateIso,
+      'evidenceQuote': evidenceQuote,
       'sourceLink': sourceLink,
     };
   }
@@ -76,6 +82,22 @@ base class PromoItemSchema {
     _json['discount'] = value;
   }
 
+  String get discountType {
+    return _json['discountType'] as String;
+  }
+
+  set discountType(String value) {
+    _json['discountType'] = value;
+  }
+
+  double get discountAmount {
+    return (_json['discountAmount'] as num).toDouble();
+  }
+
+  set discountAmount(double value) {
+    _json['discountAmount'] = value;
+  }
+
   String get terms {
     return _json['terms'] as String;
   }
@@ -98,6 +120,14 @@ base class PromoItemSchema {
 
   set expiryDateIso(String value) {
     _json['expiryDateIso'] = value;
+  }
+
+  String get evidenceQuote {
+    return _json['evidenceQuote'] as String;
+  }
+
+  set evidenceQuote(String value) {
+    _json['evidenceQuote'] = value;
   }
 
   String get sourceLink {
@@ -148,6 +178,14 @@ base class _PromoItemSchemaTypeFactory extends SchemanticType<PromoItemSchema> {
               description:
                   'Discount amount or benefit, e.g. "20%", "Rp20.000", or "Beli 1 Gratis 1", written in Bahasa Indonesia',
             ),
+            'discountType': $Schema.string(
+              description:
+                  'Type of discount, used for scoring. One of: "percentage" (e.g. 20% off), "fixed" (e.g. Rp20.000 off), "bogo" (e.g. Beli 1 Gratis 1), or "other". Use an empty string "" if unclear',
+            ),
+            'discountAmount': $Schema.number(
+              description:
+                  'Numeric value of the discount, used for scoring. For "percentage" type, the percentage number (e.g. 20 for 20%). For "fixed" type, the Rupiah amount without currency symbols (e.g. 20000 for Rp20.000). Use 0 for "bogo", "other", or when no numeric amount can be determined',
+            ),
             'terms': $Schema.string(
               description:
                   'Terms and conditions, brief, written in Bahasa Indonesia. Use an empty string "" if not mentioned in the source',
@@ -160,6 +198,10 @@ base class _PromoItemSchemaTypeFactory extends SchemanticType<PromoItemSchema> {
               description:
                   'The same expiry date as "expiryDate", but normalized to ISO 8601 format YYYY-MM-DD (e.g. "2026-08-31") so it can be compared programmatically. Use an empty string "" if the expiry date is not mentioned or unclear in the source',
             ),
+            'evidenceQuote': $Schema.string(
+              description:
+                  'A short verbatim quote (at most ~120 characters) from the search result that supports the discount amount or expiry date. Use an empty string "" if no supporting quote is available',
+            ),
             'sourceLink': $Schema.string(
               description:
                   'Source URL where this promo was found, copied exactly from the search result',
@@ -170,12 +212,14 @@ base class _PromoItemSchemaTypeFactory extends SchemanticType<PromoItemSchema> {
             'merchant',
             'promoTitle',
             'discount',
+            'discountType',
+            'discountAmount',
             'terms',
             'expiryDate',
             'expiryDateIso',
+            'evidenceQuote',
             'sourceLink',
           ],
-          additionalProperties: false,
         ).value,
         dependencies: [],
       );
@@ -242,7 +286,6 @@ base class _PromoExtractionResultTypeFactory
             ),
           },
           required: ['promos'],
-          additionalProperties: false,
         ).value,
         dependencies: [PromoItemSchema.$schema],
       );

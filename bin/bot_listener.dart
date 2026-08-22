@@ -6,6 +6,7 @@ import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
 import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_notify.dart';
+import 'package:harness/storage/seen_promos_store.dart';
 import 'package:http/http.dart' as http;
 
 /// Parses and executes incoming bot commands, separating command logic
@@ -156,6 +157,7 @@ Future<void> main() async {
     promoFlow: promoFlow,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
+    dedupStore: SeenPromosStore(outputDir: config.outputDir),
   );
   final telegram = TelegramNotify(
     botToken: config.telegramBotToken,
@@ -172,6 +174,23 @@ Future<void> main() async {
     offset = int.tryParse(offsetFile.readAsStringSync().trim()) ?? 0;
   }
 
+  // Telegram updates must be consumed by only one listener for this bot.
+  // Keep the file handle open so the OS-level lock remains held for the
+  // lifetime of this process; unlike a PID file, this also handles crashes.
+  final lockFile = File('.bot_listener.lock');
+  final lockHandle = await lockFile.open();
+  try {
+    await lockHandle.lock();
+  } on FileSystemException {
+    await lockHandle.close();
+    stderr.writeln(
+        '[bot_listener] Another bot listener is already running; exiting.');
+    exit(1);
+  }
+
+  // Protect against a duplicate update appearing in one getUpdates response.
+  var lastProcessedUpdateId = offset - 1;
+
   stdout.writeln('[bot_listener] Starting Telegram polling... (Ctrl+C to stop)');
 
   while (true) {
@@ -179,7 +198,15 @@ Future<void> main() async {
       final updates = await _getUpdates(config.telegramBotToken, offset);
 
       for (final update in updates) {
-        offset = (update['update_id'] as int) + 1;
+        final updateId = update['update_id'] as int?;
+        if (updateId == null || updateId <= lastProcessedUpdateId) {
+          stderr.writeln(
+              '[bot_listener] Skipping duplicate/invalid update: $updateId');
+          continue;
+        }
+
+        lastProcessedUpdateId = updateId;
+        offset = updateId + 1;
         offsetFile.writeAsStringSync(offset.toString());
 
         final message = update['message'] as Map<String, dynamic>?;

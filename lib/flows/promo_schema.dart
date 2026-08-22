@@ -19,6 +19,12 @@ abstract class $PromoItemSchema {
   @Field(description: 'Discount amount or benefit, e.g. "20%", "Rp20.000", or "Beli 1 Gratis 1", written in Bahasa Indonesia')
   String get discount;
 
+  @Field(description: 'Type of discount, used for scoring. One of: "percentage" (e.g. 20% off), "fixed" (e.g. Rp20.000 off), "bogo" (e.g. Beli 1 Gratis 1), or "other". Use an empty string "" if unclear')
+  String get discountType;
+
+  @Field(description: 'Numeric value of the discount, used for scoring. For "percentage" type, the percentage number (e.g. 20 for 20%). For "fixed" type, the Rupiah amount without currency symbols (e.g. 20000 for Rp20.000). Use 0 for "bogo", "other", or when no numeric amount can be determined')
+  double get discountAmount;
+
   @Field(description: 'Terms and conditions, brief, written in Bahasa Indonesia. Use an empty string "" if not mentioned in the source')
   String get terms;
 
@@ -27,6 +33,9 @@ abstract class $PromoItemSchema {
 
   @Field(description: 'The same expiry date as "expiryDate", but normalized to ISO 8601 format YYYY-MM-DD (e.g. "2026-08-31") so it can be compared programmatically. Use an empty string "" if the expiry date is not mentioned or unclear in the source')
   String get expiryDateIso;
+
+  @Field(description: 'A short verbatim quote (at most ~120 characters) from the search result that supports the discount amount or expiry date. Use an empty string "" if no supporting quote is available')
+  String get evidenceQuote;
 
   @Field(description: 'Source URL where this promo was found, copied exactly from the search result')
   String get sourceLink;

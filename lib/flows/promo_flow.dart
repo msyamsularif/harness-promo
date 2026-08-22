@@ -6,6 +6,8 @@ import 'package:genkit_google_genai/genkit_google_genai.dart';
 import 'package:genkit_openai/genkit_openai.dart';
 import 'package:intl/intl.dart';
 
+import '../core/fuzzy_dedup.dart';
+import '../core/promo_scoring.dart';
 import '../models/promo.dart';
 import '../services/serpapi_client.dart';
 import 'promo_schema.dart';
@@ -161,9 +163,12 @@ Return ONLY a JSON object with this exact structure (no markdown, no explanation
       "merchant": "Nama toko",
       "promoTitle": "Judul promo",
       "discount": "Diskon",
+      "discountType": "percentage|fixed|bogo|other|",
+      "discountAmount": 0,
       "terms": "S&K (atau kosong)",
       "expiryDate": "Tanggal kadaluarsa",
       "expiryDateIso": "YYYY-MM-DD atau kosong",
+      "evidenceQuote": "kutipan singkat pendukung diskon/expiry (atau kosong)",
       "sourceLink": "URL sumber"
     }
   ]
@@ -173,6 +178,8 @@ Rules:
 - Max $_maxPromoPerCategory different merchants. Multiple promos from same merchant = count as one.
 - Deduplicate: same merchant & offer from different sources → merge into one entry.
 - LINK ACCURACY: each promo's "sourceLink" must be the URL of a page/post that specifically discusses that exact promo. Never reuse the same sourceLink for two DIFFERENT merchants. If you cannot find a distinct, correct source link for a promo, skip that promo entirely.
+- "discountType" is one of "percentage" (20% off), "fixed" (Rp20.000 off), "bogo" (Beli 1 Gratis 1), "other", or empty if unclear. "discountAmount" is the number only (percentage number for "percentage", Rupiah amount without symbols for "fixed"); use 0 for "bogo"/"other"/unclear.
+- "evidenceQuote" is a short VERBATIM quote (max ~120 chars) from the search results that supports the discount or expiry; use "" if none.
 - Write in Bahasa Indonesia. Do not invent info.
 - If there are no valid promos, return {"promos": []}.
 - Only output the JSON object, nothing else.
@@ -238,11 +245,12 @@ Rules:
         }
       }
 
-      return byMerchant.values
+      final promos = byMerchant.values
           .take(_maxPromoPerCategory)
           .expand((group) => group)
           .map(_toPromo)
           .toList();
+      return _rankByPartialScore(dedupeMerchantAliases(promos), today);
     } catch (e) {
       stderr.writeln('[promo_flow] Failed to parse fallback response: $e');
       return [];
@@ -393,9 +401,10 @@ Once you feel the search results are sufficient, write a summary of the promos a
 5. Order the results from most interesting/relevant first.
 6. Limit to a maximum of $_maxPromoPerCategory different merchants/brands. Multiple DISTINCT promos from the same merchant are welcome — list each of them as its own bullet point; they count as ONE merchant toward the limit.
 7. For each promo, clearly state: merchant name, promo title/description, discount amount, terms & conditions (or "not specified" if none), expiry date (or "not specified"), and the source link.
-8. IMPORTANT: write all promo text (merchant names aside) in Bahasa Indonesia, since the final result will be shown to an Indonesian audience.
-9. Do not invent information that isn't in the search results.
-10. If there is no valid promo at all, clearly state that no promo was found for this category.
+8. For each promo, also include a short EVIDENCE QUOTE on its own line: a VERBATIM phrase (at most ~120 characters) from the search results that supports the discount amount or the expiry date. Use an empty line if no supporting phrase exists.
+9. IMPORTANT: write all promo text (merchant names aside) in Bahasa Indonesia, since the final result will be shown to an Indonesian audience.
+10. Do not invent information that isn't in the search results.
+11. If there is no valid promo at all, clearly state that no promo was found for this category.
 ''';
 
     final researchResponse = await _ai.generate<dynamic, String>(
@@ -416,7 +425,7 @@ Here is a free-text summary of promos for category "$category" in region "$regio
 
 $rawSummary
 
-Turn the summary above into structured data following the given schema. Do NOT add, remove, or invent any information beyond what is already in the summary — this is purely a reformatting task, not a re-analysis. Set the "category" field of every promo to exactly "$category". Keep all text field values in Bahasa Indonesia as they already are in the summary. Also normalize each promo's expiry date into the "expiryDateIso" field (format YYYY-MM-DD; use today's date $todayIso to resolve an unstated year, and an empty string "" if the summary gives no clear expiry date). If the summary above states that no promo was found, return an empty promo list.
+Turn the summary above into structured data following the given schema. Do NOT add, remove, or invent any information beyond what is already in the summary — this is purely a reformatting task, not a re-analysis. Set the "category" field of every promo to exactly "$category". Keep all text field values in Bahasa Indonesia as they already are in the summary. Also normalize each promo's expiry date into the "expiryDateIso" field (format YYYY-MM-DD; use today's date $todayIso to resolve an unstated year, and an empty string "" if the summary gives no clear expiry date). Fill the "discountType" field (one of "percentage", "fixed", "bogo", "other", or "" if unclear) and the "discountAmount" field (the number only: the percentage number for "percentage", the Rupiah amount without symbols for "fixed", 0 for "bogo"/"other"/unclear) by deriving them from the "discount" text. Fill the "evidenceQuote" field with the verbatim evidence quote line from the summary, or "" if the summary has none — do not invent a quote. If the summary above states that no promo was found, return an empty promo list.
 ''';
 
     final structuredResponse = await _ai.generate(
@@ -446,34 +455,53 @@ Turn the summary above into structured data following the given schema. Do NOT a
       return !expiry.isBefore(today);
     }
 
-    // Group by merchant (insertion order preserved, keeping Gemini's
-    // most-interesting-first ordering) so several promos from the same
-    // merchant count as ONE slot toward the cap — one very active brand
-    // can't eat the whole sub-category quota.
-    final byMerchant = <String, List<PromoItemSchema>>{};
-    for (final item in result.promos.where(isStillValid)) {
+    // Group by merchant so several promos from the same merchant count as
+    // ONE slot toward the cap — one very active brand can't eat the whole
+    // sub-category quota.
+    //
+    // Ordering before grouping is deterministic: convert to Promo,
+    // fuzzy-dedupe merchant aliases (safety-net), then sort by composite
+    // score rather than relying purely on the prompt's ordering.
+    final valid = result.promos.where(isStillValid).map(_toPromo).toList();
+    final merged = dedupeMerchantAliases(valid);
+    final ranked = _rankByPartialScore(merged, today);
+
+    final byMerchant = <String, List<Promo>>{};
+    for (final promo in ranked) {
       byMerchant
-          .putIfAbsent(_itemKey(item.merchant), () => [])
-          .add(item);
+          .putIfAbsent(promo.merchantKey, () => [])
+          .add(promo);
     }
 
     final promos = byMerchant.values
         .take(_maxPromoPerCategory)
         .expand((group) => group)
-        .map(_toPromo)
         .toList();
     stderr.writeln('[promo_flow][gemini] "$category": kept ${promos.length} '
-        'promos after validity + merchant cap.');
+        'promos after validity + fuzzy dedup + merchant cap.');
     return promos;
   }
 
-  Promo _toPromo(PromoItemSchema item) => Promo(
-        category: item.category,
-        merchant: item.merchant,
-        promoTitle: item.promoTitle,
-        discount: item.discount,
-        terms: item.terms,
-        expiryDate: item.expiryDate,
-        sourceLink: item.sourceLink,
-      );
+  Promo _toPromo(PromoItemSchema item) {
+    final raw = item.toJson();
+    return Promo(
+      category: item.category,
+      merchant: item.merchant,
+      promoTitle: item.promoTitle,
+      discount: item.discount,
+      discountType: raw['discountType']?.toString() ?? '',
+      discountAmount: (raw['discountAmount'] as num?)?.toDouble(),
+      terms: item.terms,
+      expiryDate: item.expiryDate,
+      expiryDateIso: item.expiryDateIso.trim(),
+      evidenceQuote: raw['evidenceQuote']?.toString() ?? '',
+      sourceLink: item.sourceLink,
+    );
+  }
+
+  /// Sorts [promos] by descending composite score (buzz is still -1 here,
+  /// so it contributes a constant neutral value) as a deterministic tie-in
+  /// to Gemini's "most interesting first" ordering.
+  List<Promo> _rankByPartialScore(List<Promo> promos, DateTime today) =>
+      rankByScore(promos, today: today);
 }

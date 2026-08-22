@@ -30,6 +30,16 @@ Armbian-based STB with 2GB RAM).
 - **Social buzz signal.** Each promo is checked against Instagram, TikTok,
   Facebook, YouTube, X, and Threads to gauge how much the brand is being
   talked about.
+- **Composite scoring.** Promos are ranked with a deterministic, on-device
+  score (discount value + brand tier + buzz + freshness + source
+  reliability, plus a confidence penalty) instead of relying purely on
+  Gemini's "most interesting first" ordering. See section 11.
+- **Fuzzy dedup safety-net.** Near-identical merchant names (e.g. "KFC" vs
+  "Kentucky Fried Chicken") are merged via classic string distance + a
+  small alias map — no local embedding model.
+- **Cross-week dedup.** A small `seen_promos.json` file remembers which
+  promos were already sent, so a still-running promo isn't re-sent the next
+  week (auto-pruned on expiry).
 
 ## Project structure
 
@@ -164,10 +174,12 @@ Gemini (in `lib/flows/promo_flow.dart`) plus safety nets in code:
 
 - **Cross-source deduplication**: the same promo found via multiple links is merged into one entry.
 - **Link accuracy**: the saved source link must genuinely discuss that specific promo, not a generic link.
-- **Big-brand priority**: promos from large, well-known merchants are prioritized.
+- **Big-brand priority**: promos from large, well-known merchants are prioritized (via a static brand-tier map used in the composite score, not just the prompt).
 - **Expired promos are excluded**: promos whose expiry date is before the search date are dropped (prompt instruction + code safety net via the normalized `expiryDateIso` schema field). Promos expiring ON the search day itself are still shown; promos with no stated expiry date are kept.
 - **Merchant grouping**: several distinct promos from the same merchant are kept, but rendered as ONE section on Telegram (each promo with its own details & source link, buzz shown once per merchant) and count as one slot toward the cap below — so one very active brand can't eat the whole sub-category quota.
-- **Max 10 merchants** per sub-category (enforced via prompt & merchant-grouping + `.take()` in code).
+- **Max 10 merchants** per sub-category (enforced via prompt & merchant-grouping + `.take()` in code, with the ordering determined by composite score — section 11).
+- **Fuzzy dedup safety-net**: near-identical merchant names are merged after extraction (section 11).
+- **Cross-week dedup**: promos already sent in a previous week are filtered out via `seen_promos.json` (section 11).
 
 **Weekly search region** (cron) is set via `REGION`, default
 `Jabodetabek`:
@@ -374,4 +386,40 @@ your quota/budget first.
   dart run build_runner build --delete-conflicting-outputs
   ```
 - **Gemini free tier rate limits**: the weekly summary plus a handful of on-demand requests per week is still well below the free tier limit.
-- **Cross-week deduplication**: history is already saved in `harness-data/*.json`, but nothing currently reads it back to avoid re-sending a promo that's still running from a previous week — this would be a natural next step if repeat notifications become annoying.
+- **Tune the composite-score weights**: `lib/core/promo_scoring.dart` has `discountWeight`, `brandWeight`, `buzzWeight`, `freshnessWeight`, `reliabilityWeight` and the brand tiers in `lib/core/brand_tiers.dart`. Adjust after reviewing the weekly output.
+- **Buzz platform weighting**: re-weight the buzz score by platform (TikTok/IG are more relevant for ID F&B trends than Facebook) — cheap, re-parses existing results only.
+- **Adaptive search hints**: log a per-hint success stat and lower the priority of hints that consistently return 0 results.
+
+## 11. Composite scoring, fuzzy dedup & cross-week dedup
+
+These are deliberately **device-side, arithmetic-only** additions: all heavy
+semantic work stays with Gemini/search (cloud), while the STB only does
+trivial string/number math over a small dataset (~40 promos/week).
+
+**Composite scoring** (`lib/core/promo_scoring.dart`):
+
+```
+score = discountWeight * discount + brandWeight * brandTier
+      + buzzWeight * buzz + freshnessWeight * freshness
+      + reliabilityWeight * reliability
+```
+
+Each component is normalized to 0..1. `discount` comes from the new
+`discountType`/`discountAmount` schema fields (filled by Gemini);
+`brandTier` is a small static map in `lib/core/brand_tiers.dart`; `buzz`
+uses the existing social-buzz result count; `freshness` is derived from the
+remaining validity window; `reliability` from the source-link domain. If the
+new `evidenceQuote` schema field is empty, the whole score is multiplied by
+`lowConfidenceMultiplier` (0.85) as a confidence penalty.
+
+**Fuzzy dedup safety-net** (`lib/core/fuzzy_dedup.dart`): merges merchant
+aliases ("KFC" vs "Kentucky Fried Chicken") using a static alias map +
+token Dice + Levenshtein ratio. It's a *safety net on top of* Gemini's own
+dedup, not a replacement — no local embedding model, no per-pair API call.
+
+**Cross-week dedup** (`lib/storage/seen_promos_store.dart`): a single small
+`seen_promos.json` file maps `hash(merchant|title) -> {expiry, first_seen}`.
+On every run it's loaded once, expired entries are pruned (no-expiry entries
+are dropped after 8 weeks), and promos already seen are filtered out before
+delivery. The file stays small and bounded — it never loads the full weekly
+history.
