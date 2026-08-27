@@ -74,8 +74,7 @@ class PromoDeduper {
     // Normalize a trailing English brand-type suffix so "Bean Spot Coffee"
     // matches "Bean Spot". Deliberately NOT stripping Indonesian "kopi/teh",
     // which are usually integral to the brand name itself.
-    m = m.replaceFirst(
-        RegExp(r'\s+(coffee|cafe|café)\s*$'), '').trim();
+    m = m.replaceFirst(RegExp(r'\s+(coffee|cafe|café)\s*$'), '').trim();
 
     return m;
   }
