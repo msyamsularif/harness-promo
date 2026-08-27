@@ -6,6 +6,7 @@ import 'package:harness/flows/promo_flow.dart';
 import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_formatter.dart';
 import 'package:harness/services/telegram_notify.dart';
+import 'package:harness/storage/buzz_cache.dart';
 import 'package:harness/storage/promo_storage.dart';
 
 /// Entry point for the weekly cron job. Searches for Makanan, Minuman,
@@ -30,13 +31,18 @@ Future<void> main() async {
       openRouterApiKey: config.openRouterApiKey,
       fallbackModel: config.fallbackModel,
       search: search);
+  final storage = PromoStorage(outputPath: config.outputDir);
+  final buzzCache = BuzzCache(directoryPath: config.outputDir);
   final orchestrator = PromoOrchestrator(
     search: search,
     promoFlow: promoFlow,
+    storage: storage,
+    buzzCache: buzzCache,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
+    buzzMaxMerchants: config.buzzMaxMerchants,
+    enableLlmDedup: config.enableLlmDedup,
   );
-  final storage = PromoStorage(outputPath: config.outputDir);
   final telegram = TelegramNotify(
     botToken: config.telegramBotToken,
     chatId: config.telegramChatId,
@@ -46,8 +52,7 @@ Future<void> main() async {
     stdout.writeln('[harness] Searching promos for region: ${config.region}');
 
     // Let the user know the run is in progress (it can take a few minutes).
-    await telegram.sendPlainMessage(
-        '🔎 <b>Harness Promo</b>\n'
+    await telegram.sendPlainMessage('🔎 <b>Harness Promo</b>\n'
         'Sedang mencari promo mingguan untuk <i>${escapeHtml(config.region)}</i>... '
         'mohon tunggu sebentar.');
 

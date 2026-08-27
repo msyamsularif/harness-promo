@@ -230,9 +230,7 @@ Rules:
             linkOwner[link] = merchantKey;
           }
 
-          byMerchant
-              .putIfAbsent(merchantKey, () => [])
-              .add(item);
+          byMerchant.putIfAbsent(merchantKey, () => []).add(item);
         } catch (_) {
           // Skip malformed items
         }
@@ -264,7 +262,8 @@ Rules:
   Map<String, dynamic>? _extractJson(String text) {
     // Strip markdown code fences (```json ... ```) first — GPT-OSS sometimes
     // wraps its output even when asked for raw JSON.
-    var candidate = text.trim().replaceFirst(RegExp(r'^\s*```[a-zA-Z]*\s*'), '');
+    var candidate =
+        text.trim().replaceFirst(RegExp(r'^\s*```[a-zA-Z]*\s*'), '');
     candidate = candidate.replaceFirst(RegExp(r'```\s*$'), '').trim();
 
     final direct = _tryDecodeObject(candidate);
@@ -284,8 +283,7 @@ Rules:
       if (list != null) return {'promos': list};
     }
 
-    final preview =
-        text.length > 200 ? text.substring(0, 200) : text;
+    final preview = text.length > 200 ? text.substring(0, 200) : text;
     stderr.writeln('[promo_flow] Could not parse fallback response as JSON '
         '(length ${text.length}). First 200 chars: $preview');
     return null;
@@ -452,9 +450,7 @@ Turn the summary above into structured data following the given schema. Do NOT a
     // can't eat the whole sub-category quota.
     final byMerchant = <String, List<PromoItemSchema>>{};
     for (final item in result.promos.where(isStillValid)) {
-      byMerchant
-          .putIfAbsent(_itemKey(item.merchant), () => [])
-          .add(item);
+      byMerchant.putIfAbsent(_itemKey(item.merchant), () => []).add(item);
     }
 
     final promos = byMerchant.values
@@ -474,6 +470,105 @@ Turn the summary above into structured data following the given schema. Do NOT a
         discount: item.discount,
         terms: item.terms,
         expiryDate: item.expiryDate,
+        expiryDateIso: item.expiryDateIso,
         sourceLink: item.sourceLink,
       );
+
+  /// Hybrid dedup layer 2: asks the active Gemini model to flag which of
+  /// [newPromos] are duplicates of [historicalPromos]. The deterministic
+  /// merchant-key dedup (see `PromoDeduper`) runs first and is free; this
+  /// LLM pass catches fuzzy matches (abbreviations, reworded merchant
+  /// names, added qualifiers like "via BRI" / "di Alfamart") that string
+  /// normalization cannot. Uses prompt-based JSON (consistent with the
+  /// fallback path) rather than a strict schema, since the answer is a
+  /// simple list of indices.
+  ///
+  /// [category] scopes the comparison to a single sub-category (e.g.
+  /// "Makanan"), which keeps the prompt focused and the comparison more
+  /// accurate than a cross-category batched pass.
+  ///
+  /// Returns the indices (into [newPromos]) that should be dropped.
+  Future<Set<int>> findDuplicateIndices({
+    required List<Promo> newPromos,
+    required List<Promo> historicalPromos,
+    String? category,
+  }) async {
+    if (newPromos.isEmpty || historicalPromos.isEmpty) return {};
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    // Only compare against still-valid historical promos (same rule as
+    // PromoDeduper): an expired historical promo cannot duplicate a
+    // brand-new offer.
+    final validHistory = historicalPromos.where((p) {
+      final iso = p.expiryDateIso.trim();
+      if (iso.isEmpty) return true;
+      final parsed = DateTime.tryParse(iso);
+      if (parsed == null) return true;
+      final expiry = DateTime(parsed.year, parsed.month, parsed.day);
+      return !expiry.isBefore(today);
+    }).toList();
+
+    if (validHistory.isEmpty) return {};
+
+    final newList = newPromos.asMap().entries
+        .map((e) =>
+            '${e.key}: [${e.value.merchant}] ${e.value.promoTitle} | ${e.value.discount} | s/d ${e.value.expiryDate}')
+        .join('\n');
+
+    final historyList = validHistory
+        .map((p) =>
+            '[${p.merchant}] ${p.promoTitle} | ${p.discount} | s/d ${p.expiryDate}')
+        .join('\n');
+
+    final scope = category != null ? ' in the "$category" category' : '';
+    final prompt = '''
+You are comparing two lists of promotions$scope to find duplicates.
+
+HISTORY (already reported in previous weeks, still valid):
+$historyList
+
+NEW (found this week, indexed):
+$newList
+
+Task: identify which NEW promotions are the SAME offer as a promotion in HISTORY. Two promos are the same if they refer to the same merchant AND the same underlying offer, even if the merchant name is spelled differently (e.g. an abbreviation, or an added qualifier like "via BRI", "di Alfamart") or the wording differs slightly.
+
+Return ONLY a JSON object with this exact structure (no markdown, no explanation):
+{"duplicateIndices": [0, 2]}
+
+Rules:
+- "duplicateIndices" is an array of the NEW-promo indices that are duplicates.
+- If none are duplicates, return {"duplicateIndices": []}.
+- Only output the JSON object, nothing else.
+''';
+
+    try {
+      final response = await _ai.generate<dynamic, String>(
+        model: googleAI.gemini(_modelName),
+        prompt: prompt,
+        use: [retry()],
+      );
+
+      final json = _extractJson(response.text);
+      if (json == null) {
+        stderr.writeln('[promo_flow][llm_dedup] could not parse JSON '
+            '(length ${response.text.length}).');
+        return {};
+      }
+      final list = json['duplicateIndices'] as List<dynamic>?;
+      if (list == null) return {};
+      final indices = list
+          .map((e) => int.tryParse(e.toString()))
+          .whereType<int>()
+          .where((i) => i >= 0 && i < newPromos.length)
+          .toSet();
+      stderr.writeln('[promo_flow][llm_dedup] flagged '
+          '${indices.length} duplicates out of ${newPromos.length} new promos.');
+      return indices;
+    } catch (e) {
+      stderr.writeln('[promo_flow][llm_dedup] failed: $e');
+      return {};
+    }
+  }
 }

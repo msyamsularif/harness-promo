@@ -20,7 +20,16 @@ class Promo {
   final String promoTitle;
   final String discount;
   final String terms;
-  final String expiryDate; // free-form string, e.g. "31 August 2026" / "Not specified"
+
+  /// Free-form expiry date as written in the source, e.g. "31 Agustus 2026"
+  /// or "Tidak disebutkan".
+  final String expiryDate;
+
+  /// Normalized expiry date in ISO 8601 format (YYYY-MM-DD) when available,
+  /// or an empty string when not mentioned/unclear. Used for programmatic
+  /// expiry filtering and cross-week de-duplication.
+  final String expiryDateIso;
+
   final String sourceLink;
 
   /// Number of social media search results found (Instagram, TikTok,
@@ -41,6 +50,7 @@ class Promo {
     required this.discount,
     required this.terms,
     required this.expiryDate,
+    required this.expiryDateIso,
     required this.sourceLink,
     this.buzzScore = -1,
     this.buzzLabel = 'Belum dicek',
@@ -60,6 +70,7 @@ class Promo {
         discount: discount,
         terms: terms,
         expiryDate: expiryDate,
+        expiryDateIso: expiryDateIso,
         sourceLink: sourceLink,
         buzzScore: buzzScore,
         buzzLabel: buzzLabel,
@@ -74,6 +85,7 @@ class Promo {
       discount: json['discount']?.toString() ?? '-',
       terms: json['terms']?.toString() ?? '',
       expiryDate: json['expiry_date']?.toString() ?? 'Tidak disebutkan',
+      expiryDateIso: json['expiry_date_iso']?.toString() ?? '',
       sourceLink: json['source_link']?.toString() ?? '',
       buzzScore: json['buzz_score'] is int ? json['buzz_score'] as int : -1,
       buzzLabel: json['buzz_label']?.toString() ?? 'Belum dicek',
@@ -91,6 +103,7 @@ class Promo {
         'discount': discount,
         'terms': terms,
         'expiry_date': expiryDate,
+        'expiry_date_iso': expiryDateIso,
         'source_link': sourceLink,
         'buzz_score': buzzScore,
         'buzz_label': buzzLabel,
