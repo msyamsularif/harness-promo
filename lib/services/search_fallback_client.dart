@@ -12,8 +12,19 @@ import 'tavily_client.dart';
 /// with providers that have no API key simply omitted from the chain. An
 /// EMPTY result set does NOT trigger a fallback — it is treated as a
 /// legitimate "no results found" answer and returned as-is.
+///
+/// This client also keeps an in-memory cache of successful searches for the
+/// lifetime of the instance, so identical queries (e.g. Gemini retries,
+/// fallback paths, or overlapping category searches) do not burn extra
+/// search-provider quota.
 class SearchFallbackClient implements SearchService {
   final List<SearchService> _providers;
+
+  // normalized query -> cleaned results
+  final Map<String, List<SearchResult>> _cache = {};
+
+  var _totalCalls = 0;
+  var _cacheHits = 0;
 
   SearchFallbackClient({required List<SearchService> providers})
       : _providers = providers;
@@ -26,12 +37,23 @@ class SearchFallbackClient implements SearchService {
           'SERPER_API_KEY, or SERPAPI_KEY.');
     }
 
+    _totalCalls++;
+    final normalizedQuery = query.trim();
+    final cached = _cache[normalizedQuery];
+    if (cached != null) {
+      _cacheHits++;
+      stderr.writeln('[search] query "$query" served from cache '
+          '(${cached.length} results).');
+      return cached.toList();
+    }
+
     Object? lastError;
     for (var i = 0; i < _providers.length; i++) {
       final provider = _providers[i];
       try {
         final results = await provider.search(query, maxResults: maxResults);
         final cleaned = _cleanResults(results);
+        _cache[normalizedQuery] = cleaned;
         if (i > 0) {
           stderr.writeln('[search] query "$query" served by '
               '${provider.runtimeType} (${cleaned.length} results) — '
@@ -40,7 +62,7 @@ class SearchFallbackClient implements SearchService {
           stderr.writeln('[search] query "$query" served by '
               '${provider.runtimeType} (${cleaned.length} results).');
         }
-        return cleaned;
+        return cleaned.toList();
       } catch (e) {
         lastError = e;
         final next = (i + 1 < _providers.length)
@@ -58,6 +80,9 @@ class SearchFallbackClient implements SearchService {
 
   @override
   void close() {
+    stderr.writeln('[search] summary: $_totalCalls total calls, '
+        '$_cacheHits cache hits, '
+        '${_totalCalls - _cacheHits} provider calls');
     for (final provider in _providers) {
       try {
         provider.close();
@@ -73,7 +98,8 @@ class SearchFallbackClient implements SearchService {
   /// model extract a promo from another source.
   List<SearchResult> _cleanResults(List<SearchResult> results) => results
       .map((r) => r.normalized())
-      .where((r) => r.title.isNotEmpty || r.snippet.isNotEmpty || r.link.isNotEmpty)
+      .where((r) =>
+          r.title.isNotEmpty || r.snippet.isNotEmpty || r.link.isNotEmpty)
       .toList();
 }
 

@@ -23,6 +23,17 @@ class Config {
   /// (ENABLE_BUZZ_CHECK=false) to save quota.
   final bool enableBuzzCheck;
 
+  /// Caps the number of merchants buzz-checked per sub-category (0 = no
+  /// cap). Set via `BUZZ_MAX_MERCHANTS`. Lower values save search-provider
+  /// calls at the cost of showing the buzz signal for fewer merchants.
+  final int buzzMaxMerchants;
+
+  /// Enables the LLM-based cross-week dedup pass (layer 2). When true, after
+  /// the deterministic merchant-key dedup, the flow asks Gemini once per run
+  /// to flag fuzzy duplicates (abbreviations, reworded merchant names).
+  /// Costs 1 extra Gemini call per run. Set via `ENABLE_LLM_DEDUP`.
+  final bool enableLlmDedup;
+
   /// Enables filtering out promos whose source link is unreachable.
   /// Disable via .env (ENABLE_LINK_VALIDATION=false) if this causes too
   /// many false negatives (some sites block bot-like requests).
@@ -40,6 +51,8 @@ class Config {
     required this.outputDir,
     required this.region,
     required this.enableBuzzCheck,
+    required this.buzzMaxMerchants,
+    required this.enableLlmDedup,
     required this.enableLinkValidation,
   });
 
@@ -69,6 +82,12 @@ class Config {
       final value = env[key];
       if (value == null || value.trim().isEmpty) return defaultValue;
       return value.trim().toLowerCase() != 'false';
+    }
+
+    int intOrDefault(String key, int defaultValue) {
+      final value = env[key];
+      if (value == null || value.trim().isEmpty) return defaultValue;
+      return int.tryParse(value.trim()) ?? defaultValue;
     }
 
     String? optional(String key) {
@@ -101,6 +120,8 @@ class Config {
       outputDir: orDefault('OUTPUT_DIR', './harness-data'),
       region: orDefault('REGION', 'Jabodetabek'),
       enableBuzzCheck: boolOrDefault('ENABLE_BUZZ_CHECK', true),
+      buzzMaxMerchants: intOrDefault('BUZZ_MAX_MERCHANTS', 0),
+      enableLlmDedup: boolOrDefault('ENABLE_LLM_DEDUP', false),
       enableLinkValidation: boolOrDefault('ENABLE_LINK_VALIDATION', true),
     );
   }

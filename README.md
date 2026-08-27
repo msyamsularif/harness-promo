@@ -30,6 +30,17 @@ Armbian-based STB with 2GB RAM).
 - **Social buzz signal.** Each promo is checked against Instagram, TikTok,
   Facebook, YouTube, X, and Threads to gauge how much the brand is being
   talked about.
+- **Cross-week deduplication (hybrid).** Layer 1: a deterministic
+  merchant-key filter skips promos whose normalized merchant name already
+  appeared in a previous week and is still valid. Layer 2 (optional,
+  `ENABLE_LLM_DEDUP`): per-category Gemini calls flag fuzzy duplicates that
+  string normalization misses (abbreviations, reworded names, added
+  qualifiers like "via BRI"). Still-running promos aren't re-sent and don't
+  burn extra link-validation + buzz calls. Dedup runs per sub-category so a
+  failure in one never blocks the others.
+- **Buzz caching & capping.** Buzz results are cached per merchant for 14
+  days (`buzz_cache.json`) and can be capped per sub-category
+  (`BUZZ_MAX_MERCHANTS`) to keep search-provider costs flat.
 
 ## Project structure
 
@@ -41,7 +52,9 @@ harness/
 ├── lib/
 │   ├── config.dart                # .env / environment variable loader
 │   ├── core/
-│   │   └── promo_orchestrator.dart # main orchestration logic
+│   │   ├── promo_orchestrator.dart # main orchestration logic
+│   │   ├── promo_constants.dart   # category hints & parent grouping
+│   │   └── promo_deduper.dart     # cross-week promo de-duplication
 │   ├── flows/
 │   │   ├── promo_flow.dart        # Genkit flow: tool registration + Gemini extraction
 │   │   └── promo_schema.dart      # output & tool-input schemas (schemantic)
@@ -56,7 +69,8 @@ harness/
 │   │   ├── link_validator.dart    # drops promos with unreachable source links
 │   │   └── telegram_notify.dart   # formats & sends results to Telegram
 │   └── storage/
-│       └── promo_storage.dart     # saves weekly JSON history
+│       ├── promo_storage.dart     # saves weekly JSON history
+│       └── buzz_cache.dart        # persistent merchant buzz cache (14-day TTL)
 ├── .env.example
 ├── .gitignore
 ├── LICENSE
@@ -353,6 +367,24 @@ YouTube, X, and Threads** — shown on Telegram as:
 - Score labels: 0 results = "Belum ramai dibicarakan", 1-3 = "Mulai dibicarakan", 4-7 = "Cukup ramai", 8+ = "Sangat ramai 🔥".
 - Buzz checks run in parallel per batch, so they don't add a large linear delay.
 
+**Reducing buzz cost further** (two built-in levers):
+
+- **Cross-run cache** — every buzz result is saved to
+  `<OUTPUT_DIR>/buzz_cache.json`, keyed by merchant, with a 14-day TTL.
+  A merchant checked within the last two weeks reuses its cached score
+  instead of triggering a new search-provider call. Because buzz is
+  merchant-level (not promo-level) and changes slowly, this removes most
+  of the weekly buzz cost after the first run. The cache is written
+  automatically at the end of every run.
+- **`BUZZ_MAX_MERCHANTS`** — caps how many merchants get a buzz check per
+  sub-category (`0` = no cap, the default). Gemini already orders promos
+  most-interesting-first, so capping keeps the signal for the top
+  merchants while skipping the long tail:
+
+  ```
+  BUZZ_MAX_MERCHANTS=5
+  ```
+
 **If search-provider quota becomes a problem**, disable via `.env`:
 
 ```
@@ -374,4 +406,6 @@ your quota/budget first.
   dart run build_runner build --delete-conflicting-outputs
   ```
 - **Gemini free tier rate limits**: the weekly summary plus a handful of on-demand requests per week is still well below the free tier limit.
-- **Cross-week deduplication**: history is already saved in `harness-data/*.json`, but nothing currently reads it back to avoid re-sending a promo that's still running from a previous week — this would be a natural next step if repeat notifications become annoying.
+- **Cross-week deduplication (implemented, hybrid)**: the orchestrator loads the most recent `promo_YYYY-MM-DD.json` history and, in two layers, drops newly extracted promos that duplicate a previous week's still-valid offer:
+  1. `lib/core/promo_deduper.dart` — deterministic, keyed by a **normalized merchant name** (lowercase + strip parentheticals / "via X" / "di X" / "cabang ..." / English coffee-suffix). Zero API cost.
+  2. `ENABLE_LLM_DEDUP=true` — one Gemini call per sub-category flags fuzzy duplicates (abbreviations, reworded names) that layer 1 misses. Costs ~4 extra Gemini calls per weekly run, defaults to `false`.

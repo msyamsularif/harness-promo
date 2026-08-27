@@ -6,6 +6,7 @@ import 'package:harness/core/promo_orchestrator.dart';
 import 'package:harness/flows/promo_flow.dart';
 import 'package:harness/services/search_fallback_client.dart';
 import 'package:harness/services/telegram_notify.dart';
+import 'package:harness/storage/buzz_cache.dart';
 import 'package:http/http.dart' as http;
 
 /// Parses and executes incoming bot commands, separating command logic
@@ -151,11 +152,15 @@ Future<void> main() async {
       openRouterApiKey: config.openRouterApiKey,
       fallbackModel: config.fallbackModel,
       search: search);
+  final buzzCache = BuzzCache(directoryPath: config.outputDir);
   final orchestrator = PromoOrchestrator(
     search: search,
     promoFlow: promoFlow,
+    buzzCache: buzzCache,
     enableBuzzCheck: config.enableBuzzCheck,
     enableLinkValidation: config.enableLinkValidation,
+    buzzMaxMerchants: config.buzzMaxMerchants,
+    enableLlmDedup: config.enableLlmDedup,
   );
   final telegram = TelegramNotify(
     botToken: config.telegramBotToken,
