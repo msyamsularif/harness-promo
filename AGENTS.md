@@ -35,5 +35,7 @@ In `lib/flows/promo_flow.dart`, extraction is deliberately split into TWO `gener
 ## Conventions
 
 - Code, comments, and Gemini prompts are in English, but **user-facing content is intentionally in Bahasa Indonesia** (promo text, Telegram messages, schema descriptions, search queries). Do not translate Indonesian strings to English.
-- `lints` is in dev_dependencies but there is no `analysis_options.yaml` — `dart analyze` runs with default rules.
+- `lints` is in dev_dependencies and lint rules are configured in
+  `analysis_options.yaml` (strict analyzer language modes plus a curated
+  rule set) — run `dart analyze` to verify changes.
 - README.md is unusually detailed: sections 8–10 explain *why* the architecture is this way (SerpApi-as-tool rationale, buzz-signal cost tradeoffs, link-validation false-negative handling). Read it before changing extraction, buzz, or link-validation logic.
