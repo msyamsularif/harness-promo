@@ -38,4 +38,4 @@ In `lib/flows/promo_flow.dart`, extraction is deliberately split into TWO `gener
 - `lints` is in dev_dependencies and lint rules are configured in
   `analysis_options.yaml` (strict analyzer language modes plus a curated
   rule set) — run `dart analyze` to verify changes.
-- README.md is unusually detailed: sections 8–10 explain *why* the architecture is this way (SerpApi-as-tool rationale, buzz-signal cost tradeoffs, link-validation false-negative handling). Read it before changing extraction, buzz, or link-validation logic.
+- README.md is unusually detailed: sections 8–10 explain _why_ the architecture is this way (SerpApi-as-tool rationale, buzz-signal cost tradeoffs, link-validation false-negative handling). Read it before changing extraction, buzz, or link-validation logic.
