@@ -1,4 +1,4 @@
-# Harness — Weekly Promo Scraper + On-Demand Bot
+# Harness Promo Search
 
 A Dart CLI program that searches for the latest **Makanan** (food),
 **Minuman** (drinks, including coffee), **Jajanan** (snacks), and
