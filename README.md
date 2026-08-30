@@ -16,9 +16,11 @@ Armbian-based STB with 2GB RAM).
 
 ## Key design choices
 
-- **SerpApi as a Genkit tool, not a manual pre-fetch.** Gemini decides its
-  own search queries via tool calling and may search multiple times if
-  needed, instead of us fetching a fixed batch of results up front. See
+- **Search provider as a Genkit tool, not a manual pre-fetch.** Gemini
+  decides its own search queries via tool calling and may search multiple
+  times if needed, instead of us fetching a fixed batch of results up
+  front. The provider behind the tool is pluggable (Tavily > Serper >
+  SerpApi fallback chain). See
   [genkit.dev/docs/js/tool-calling](https://genkit.dev/docs/js/tool-calling/)
   and section 8 below for why this required splitting extraction into two
   separate `generate()` calls.
@@ -41,6 +43,14 @@ Armbian-based STB with 2GB RAM).
 - **Buzz caching & capping.** Buzz results are cached per merchant for 14
   days (`buzz_cache.json`) and can be capped per sub-category
   (`BUZZ_MAX_MERCHANTS`) to keep search-provider costs flat.
+- **Per-run caches & cost-first pipeline order.** Within a single run,
+  identical search queries are served from an in-memory cache
+  (`SearchFallbackClient`) and already-checked source URLs skip
+  re-validation (`LinkValidator`). Enrichment is ordered cheapest-first
+  per sub-category: expiry filter → link validation → buzz check, so
+  paid search-provider calls are only spent on promos that survived the
+  free checks. Each run also logs telemetry (cache hits, dedup skips,
+  provider call counts) to stderr for cost monitoring.
 
 ## Project structure
 
@@ -73,6 +83,7 @@ harness/
 │       └── buzz_cache.dart        # persistent merchant buzz cache (14-day TTL)
 ├── .env.example
 ├── .gitignore
+├── analysis_options.yaml     # strict analyzer + lint rules
 ├── LICENSE
 ├── pubspec.yaml
 └── README.md
@@ -92,6 +103,10 @@ whenever you change `lib/flows/promo_schema.dart`) — it generates
 `lib/flows/promo_schema.g.dart`, containing the concrete schema
 implementation used to force Gemini's responses into the structure you
 defined. The project will not compile without this generated file.
+
+Linting is configured via `analysis_options.yaml` (strict analyzer
+language modes plus a curated rule set on top of the `lints` package) —
+run `dart analyze` to verify changes.
 
 Fill in `.env` with:
 
@@ -200,8 +215,15 @@ promos for a specific location, any time:
 /promo Bandung
 /promo Surabaya fnb
 /promo Malang minuman
-/help
+/promo Jakarta jajanan
+/promo Depok lifestyle
+/help  (or /start)
 ```
+
+The optional second argument filters by category: `fnb` (all three F&B
+sub-categories), `makanan`, `minuman`, `jajanan`, or `lifestyle`. Omit it
+to search all categories. Unknown or malformed commands get a usage hint
+reply in Bahasa Indonesia.
 
 ### Why separate from cron?
 
@@ -270,7 +292,11 @@ calls itself. The search provider is an abstraction (`SearchService`) with
 a fixed fallback chain **Tavily > Serper > SerpApi**
 (`lib/services/search_fallback_client.dart`): whichever providers have an
 API key configured are tried in that order, and a failure/rate-limit on
-one automatically falls through to the next.
+one automatically falls through to the next. The client also keeps an
+**in-memory query cache per run** — an identical query issued twice in
+the same run (e.g. the same keyword suggested to two sub-categories) is
+served from cache instead of costing a second provider call, and the
+run-end telemetry line reports how many calls the cache saved.
 
 **Why split into TWO `generate()` calls, not one:**
 Combining tool calling (`toolNames`) with structured output
@@ -339,6 +365,15 @@ promo** is dropped — not just the link.
   would create too many false negatives.
 - Checks run in parallel (`Future.wait`) across all promos in a batch, so
   this doesn't add a large linear delay.
+- Results are cached **per run** by normalized URL, so the same link
+  appearing in multiple promos (or across sub-categories) is only checked
+  once per run.
+
+**Where this runs in the pipeline:** enrichment is ordered
+cheapest-first per sub-category — expired promos are dropped first (free,
+no network), then link validation, and only survivors get a buzz check.
+That way paid search-provider calls are never wasted on promos that would
+have been filtered out anyway.
 
 **If this causes too many false negatives** (e.g. your network is behind
 a firewall/proxy that blocks outgoing requests to certain sites), disable
